@@ -276,6 +276,7 @@
       <li class="ok">Nothing deletes or stops the promoted standby</li><li class="ok"><code>fox up</code> brings it back, not the old main</li>
       <li class="ok"><code>fox ha failback</code>, keeping every write</li><li class="ok">The promoted standby archives WAL, so backups and PITR cover the failover</li>
       <li class="ok">With the change feed on, the standby&rsquo;s own physical slot and a conninfo with a database name, so realtime subscribers keep their position across a promotion (N1)</li>
+      <li class="ok"><b>Zero data loss, opt in</b> (HA plan phase 5): <code>fox ha sync on|off</code> &mdash; a commit waits until the standby has it on disk. Off by default; with one standby, if it stops writes stop, and the CLI says so. The release works while commits are stalled, a failover clears it so the promoted node is never left waiting for a standby it does not have, and <code>fox check</code> calls &ldquo;on but nothing counted&rdquo; a failure</li>
       <li class="todo">Automatic failover, fencing, multi-host</li></ul></td><td class="tb">Unit; VM §6, §7</td></tr>
     <tr data-id="D5" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">D5</td><td><b>Portable export &amp; restore</b><ul class="subs">
       <li class="ok">Every non-agent branch: pg_dump, its roles, the Blackbox head; SHA256SUMS over all</li>

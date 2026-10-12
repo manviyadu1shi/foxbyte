@@ -23,6 +23,10 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
 # pg <container> <sql>  -> tuples-only result
 pg() { local c="$1"; shift; sudo docker exec -e PGPASSWORD=foxbyte "$c" psql -U dbadmin -d appdb -tAc "$*" 2>/dev/null; }
+# pgt is pg with a deadline, for section 6's zero-data-loss block. The failure
+# that feature can have is a commit that never returns, and an unguarded psql
+# would hang the whole suite instead of failing one assertion.
+pgt() { local t="$1" c="$2"; shift 2; timeout "$t" sudo docker exec -e PGPASSWORD=foxbyte "$c" psql -q -U dbadmin -d appdb -tAc "$*" 2>/dev/null; }
 jget() { python3 -c 'import sys,json; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
 
 echo "### 0. a foreign container named \"minio\" does not break the stack"
@@ -341,7 +345,62 @@ $S branch delete itrep >/dev/null 2>&1; sudo docker rm -f itsrc >/dev/null 2>&1
 echo "### 6. HA: replication + failover + failback"
 $S ha enable >/dev/null 2>&1; sleep 2
 assert_eq "standby is streaming" "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
+
+# ---- zero-data-loss mode (HA plan phase 5) --------------------------------
+#
+# Every write in this block is wrapped in `timeout`, because the failure this
+# feature can have is a commit that never returns: an unguarded psql would hang
+# the whole suite instead of failing one assertion.
+assert_eq "commits do not wait by default" "$(pg pg-main "SELECT current_setting('synchronous_standby_names')")" ""
+$S ha sync on >/tmp/sync-on.log 2>&1
+assert_eq "\`ha sync on\` exits 0" "$?" "0"
+assert_eq "…and the standby is counted as a quorum member" \
+  "$(pg pg-main "SELECT sync_state FROM pg_stat_replication WHERE application_name='fox_standby'")" "quorum"
+assert_eq "…which needs the standby to call itself that" \
+  "$(pg pg-standby "SELECT current_setting('cluster_name')")" "fox_standby"
+assert_eq "a commit still completes while a standby is there to wait for" \
+  "$(pgt 15 pg-main "INSERT INTO pit VALUES (97) RETURNING 'ok'")" "ok"
+
+# The cost, demonstrated rather than described: with the standby gone, a commit
+# does not fail -- it waits, for as long as it takes.
+sudo docker stop pg-standby >/dev/null 2>&1; sleep 3
+pgt 10 pg-main "INSERT INTO pit VALUES (98)" >/dev/null
+assert_eq "with the standby gone, a commit waits instead of failing" "$?" "124"
+assert_eq "…and \`check\` calls that a failure, not a warning" \
+  "$($S check 2>&1 | grep -c '^FAIL  durability')" "1"
+assert_eq "…naming the one command that releases them" \
+  "$($S check 2>&1 | grep -A1 'durability' | grep -c 'ha sync off')" "1"
+
+# The escape hatch, which is the property that makes the mode safe to offer:
+# it works *while* commits are stalled, because ALTER SYSTEM and a reload need
+# no commit of their own.
+$S ha sync off >/tmp/sync-off.log 2>&1
+assert_eq "\`ha sync off\` exits 0 while commits are stalled" "$?" "0"
+assert_eq "…and releases them" \
+  "$(pgt 15 pg-main "INSERT INTO pit VALUES (96) RETURNING 'ok'")" "ok"
+assert_eq "…and the write that was waiting is not lost" "$(pg pg-main 'SELECT count(*) FROM pit WHERE id=98')" "1"
+
+# Back on, so the failover below is made with the mode in effect -- which is
+# the state that produced the trap this guards against.
+sudo docker start pg-standby >/dev/null 2>&1; sleep 6
+$S ha sync on >/dev/null 2>&1
+assert_eq "the mode goes back on once the standby returns" \
+  "$(pg pg-main "SELECT sync_state FROM pg_stat_replication WHERE application_name='fox_standby'")" "quorum"
+
 $S ha failover >/dev/null 2>&1; sleep 3
+# The trap. ALTER SYSTEM writes postgresql.auto.conf and pg_basebackup copies
+# PGDATA, so a standby built while the mode was on carries the setting. Promote
+# it and it waits for a standby of its own that does not exist: every write
+# stops at the moment of a failover, which is the moment it must not.
+assert_eq "the promoted standby is not waiting for a standby of its own" \
+  "$(pg pg-standby "SELECT current_setting('synchronous_standby_names')")" ""
+assert_eq "…so a commit on it completes" \
+  "$(pgt 15 pg-standby "INSERT INTO pit VALUES (95) RETURNING 'ok'")" "ok"
+assert_eq "…and the mode is reported as asked-for but not in effect" \
+  "$($S check 2>&1 | grep -c '^warn  durability')" "1"
+$S ha sync off >/dev/null 2>&1   # clear the intent, so nothing below waits
+# ---- end phase 5 -----------------------------------------------------------
+
 W="$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -tAqc "INSERT INTO pit VALUES (99) RETURNING 'okwrite'" 2>&1 | head -1)"
 assert_eq "write succeeds via gateway after failover" "$W" "okwrite"
 # After a failover the promoted standby is the only primary: nothing may delete or stop it.

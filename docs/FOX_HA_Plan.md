@@ -373,14 +373,99 @@ from "now", and that row would never have reached anyone.
 *licence* still does not, and after Phase 1 the promoted node is a different
 machine with a different fingerprint.
 
-### Phase 5 — opt-in zero-data-loss mode (small)
+### Phase 5 — opt-in zero-data-loss mode — **done**
 
-`synchronous_standby_names` with a quorum (`ANY 1 (...)`) so one slow standby
-cannot stall writes. Strictly opt-in and named for what it costs — it breaks
-the "never slow the commit" rule, so the buyer chooses it knowingly.
+`fox ha sync on` makes the primary hold a commit until the standby has it on
+disk; `fox ha sync off` releases it. RPO zero inside the data centre, which is
+what a regulated buyer is usually asking for when they say "active-active".
+Strictly opt-in and named for what it costs, as the plan asked.
 
-Unlocks: RPO of zero inside the data centre, which is what a regulated buyer
-is usually asking for when they say "active-active".
+**One correction to the sentence above, and it matters commercially.** The plan
+described `ANY 1 (...)` as a quorum "so one slow standby cannot stall writes".
+A quorum does that only when there is more than one standby to choose from.
+With the single standby this engine builds today, `ANY 1 (fox_standby)` means
+every commit waits for that one standby, and **if it stops, writes stop**. The
+quorum form is still the right thing to write — it is what phase 1 extends by
+adding names rather than by rewriting this code — but it buys nothing yet, and
+a buyer told otherwise would be misled. So the CLI says it outright:
+
+```
+Zero-data-loss mode is on: a commit is not reported until the standby has it on disk.
+  Writes now wait for a second machine, so they are slower by the round trip to it.
+  There is one standby, so if it stops, writes stop. `fox ha sync off` releases them,
+  and works while they are waiting.
+```
+
+**The escape hatch is the reason this is safe to offer at all.** `ALTER SYSTEM
+RESET synchronous_standby_names` plus a reload works *while every commit is
+waiting*, because neither needs a commit of its own. Verified against a primary
+with two backends stalled in `SyncRep`: both were released and the next commit
+succeeded. Without that property, switching this on would be a one-way door,
+and `fox check` would have nothing useful to say.
+
+**The standby has to have a name, and `pg_basebackup` does not give it one.**
+`-R` writes no `application_name` into `primary_conninfo`, so the walreceiver
+reports itself as `walreceiver` and `synchronous_standby_names = 'ANY 1
+(fox_standby)'` would match nothing — the setting would be in place, no standby
+would satisfy it, and every commit would wait for a server that can never
+answer. The name comes from the standby's **`cluster_name`**, set on its own
+command line, which also makes it the physical slot name from phase 4: one word
+names this standby in `pg_replication_slots`, in `pg_stat_replication`, and in
+`synchronous_standby_names`. `cluster_name` is postmaster-scoped, so `ha sync
+on` restarts a standby that predates this rather than asking for a rebuild —
+the same thing `realtime setup` already does for the same reason.
+
+**Named rather than `*`.** `synchronous_standby_names = '*'` matches any
+walsender, and `pg_basebackup -X stream` is a walsender — a backup in progress
+would satisfy the quorum and a commit would be reported durable when only a
+backup had it. Checked: with the standby stopped and a base backup running, a
+commit still waits.
+
+**Enabling proves itself and rolls back.** After applying the setting, `ha sync
+on` asserts the standby is actually counted (`sync_state = 'quorum'`). If it is
+not, the database is already refusing to finish a commit, so the setting is
+undone and the command fails saying nothing was changed — rather than reporting
+success and leaving somebody to discover it.
+
+#### The trap: a failover would have made the database unwritable
+
+`ALTER SYSTEM` writes `postgresql.auto.conf`, and `pg_basebackup` copies
+`PGDATA` — so a standby built while this mode was on **carries the setting**.
+Checked; it is in the copy. Promote that standby and it is a primary waiting for
+a standby of its own that does not exist: every write stops at the moment of a
+failover, which is the moment it must not.
+
+So `ha failover` clears it on the promoted node and says the mode is off until a
+new standby exists. `ha failback` and `ha disable` do the same for their own
+reasons. The *intent* is kept in a marker file separate from the setting, so
+`ha status` and `fox check` can tell "nobody asked for this" from "it was asked
+for and cannot be honoured right now" — and `ha enable` puts it back once a
+standby is streaming again.
+
+#### What `fox check` says
+
+A new **durability** line, because this is the one feature whose failure looks
+like the database hanging:
+
+| State | Line |
+|---|---|
+| on, standby counted | `ok` — zero data loss, a commit waits until `fox_standby` has it |
+| on, nothing counted | **`FAIL`** — every commit is waiting and will not complete, with `ha sync off` on the next line |
+| asked for, not in effect | `warn` — no standby to wait for, so a lost machine still costs up to 60s |
+| not asked for | `ok` — commits never wait, and what that costs |
+
+The failing case is the point. From outside, a stalled primary looks like a hung
+database; `fox check` is where somebody looks, so the one command that releases
+it has to be on the screen, along with the fact that it works *while* commits
+are stalled.
+
+**Not changed:** `synchronous_commit` stays at its default `on`, which already
+means "wait for the standby to flush" once names are set. `remote_apply` would
+additionally wait for replay — read-your-writes on the standby, at more latency
+— and is a separate decision nobody has asked for.
+
+Unlocks: RPO of zero inside the data centre. Phase 1 is what makes the quorum
+form mean what the plan originally claimed.
 
 ### Phase 6 — DR site and drills (medium)
 

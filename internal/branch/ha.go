@@ -18,11 +18,17 @@ type HAState struct {
 	Standby   string `json:"standby"`   // standby container state
 	Streaming bool   `json:"streaming"` // primary has a streaming standby
 	Primary   string `json:"primary"`   // branch name currently serving as primary
+	// Sync is whether zero-data-loss mode was asked for, and SyncActive whether
+	// the primary is actually waiting for the standby. They differ whenever
+	// there is no standby to wait for — a failover, or a rebuild in progress —
+	// and that difference is the thing worth showing rather than one bit.
+	Sync       bool `json:"sync"`
+	SyncActive bool `json:"sync_active"`
 }
 
 // HAInfo reports current HA status.
 func HAInfo() HAState {
-	st := HAState{Primary: "main"}
+	st := HAState{Primary: "main", Sync: SyncOn()}
 	if PrimaryContainer() == container("standby") {
 		st.Primary = "standby"
 	}
@@ -32,11 +38,17 @@ func HAInfo() HAState {
 	}
 	st.Enabled = true
 	st.Standby = cs
+	// Both facts in one round trip, because this feeds the dashboard and the
+	// status API: a second `docker exec psql` per call would double what the
+	// page waits for to learn one extra bit.
 	out, _ := capture("docker", "exec", "--env-file", pgEnvFile(), PrimaryContainer(),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-tAc",
-		"SELECT count(*) FROM pg_stat_replication WHERE state='streaming';")
-	if n := strings.TrimSpace(out); n != "" && n != "0" {
-		st.Streaming = true
+		"SELECT (SELECT count(*) FROM pg_stat_replication WHERE state='streaming')::text"+
+			" || '|' || (current_setting('synchronous_standby_names') <> '')::text")
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) == 2 {
+		st.Streaming = parts[0] != "" && parts[0] != "0"
+		st.SyncActive = strings.HasPrefix(strings.ToLower(parts[1]), "t")
 	}
 	return st
 }
@@ -121,13 +133,20 @@ func startStandbyContainer(store storage) error {
 	return run("docker", standbyRunArgs(store.standbyPath())...)
 }
 
+// StandbyName is what this install calls its standby, and it is one word on
+// purpose: it names the standby's physical replication slot on the primary, the
+// standby's cluster_name, and therefore the application_name the primary sees
+// in pg_stat_replication and the name synchronous_standby_names looks for.
+// Three places Postgres keeps in different namespaces, one participant.
+const StandbyName = "fox_standby"
+
 // StandbySlot is the physical replication slot a standby holds on its primary.
 //
 // Deliberately outside SlotPrefix: the change feed's slots are swept, listed
 // and dropped by name prefix, and this one must never be caught by any of that
 // — losing it would leave the standby without the slot that slot
 // synchronisation depends on.
-const StandbySlot = "fox_standby"
+const StandbySlot = StandbyName
 
 // standbySlotWanted reports whether this install needs the physical slot, and
 // it is the same switch as the rest of slot synchronisation on purpose.
@@ -271,7 +290,13 @@ func standbyRunArgs(dataPath string) []string {
 	if standbySlotWanted() {
 		args = append(args, "-c", "primary_slot_name="+StandbySlot)
 	}
-	return args
+	// And what this standby calls itself. Unconditional, because it costs
+	// nothing and it is how the primary identifies the standby at all:
+	// pg_basebackup -R writes no application_name, so without this the walreceiver
+	// reports as `walreceiver` and zero-data-loss mode cannot name it.
+	// cluster_name is fixed at postmaster start, which is why `ha sync on`
+	// restarts a standby that predates this rather than asking for a rebuild.
+	return append(args, "-c", "cluster_name="+StandbyName)
 }
 
 // HAEnable provisions a hot standby streaming from the current primary.
@@ -312,7 +337,14 @@ func HAEnable() error {
 	if err := startStandbyContainer(store); err != nil {
 		return err
 	}
-	return waitReady("standby")
+	if err := waitReady("standby"); err != nil {
+		return err
+	}
+	// A standby exists again, so an install that asked for zero-data-loss mode
+	// and lost it to a failover gets it back. Reports and carries on rather than
+	// failing: a standby that is streaming is worth more than a setting.
+	restoreSync()
+	return nil
 }
 
 // RestartStandby recreates the standby's container on its existing storage, so
@@ -352,6 +384,19 @@ func HAStatus() error {
 		fmt.Println("standby exists but is not running. Rebuild it with: foxbyte ha enable")
 		return nil
 	}
+	fmt.Println("=== durability ===")
+	switch {
+	case SyncActive() && syncQuorumMet():
+		fmt.Printf("zero-data-loss mode is ON: a commit waits until %s has it on disk (RPO zero).\n", StandbyName)
+	case SyncActive():
+		fmt.Printf("zero-data-loss mode is ON but %s is NOT being counted — commits are waiting and\n"+
+			"will not complete. Release them with: %s ha sync off\n", StandbyName, brand.CLI)
+	case SyncOn():
+		fmt.Printf("zero-data-loss mode was asked for but is not in effect. Put it back with: %s ha sync on\n", brand.CLI)
+	default:
+		fmt.Println("replication is asynchronous: commits never wait, and a lost machine costs")
+		fmt.Println("up to archive_timeout (60s) of writes. `fox ha sync on` trades the first for the second.")
+	}
 	fmt.Println("=== primary: connected standbys (pg_stat_replication) ===")
 	_ = run("docker", "exec", "--env-file", pgEnvFile(), PrimaryContainer(),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-x", "-c",
@@ -381,6 +426,25 @@ func HAFailover() error {
 	if err := setPrimary("standby"); err != nil {
 		return err
 	}
+	// Zero-data-loss mode does not survive the promotion, and must not.
+	//
+	// ALTER SYSTEM writes postgresql.auto.conf and pg_basebackup copies PGDATA,
+	// so a standby built while the mode was on carries the setting — checked, it
+	// is in the copy. The promoted standby is now a primary with no standby of
+	// its own, so the setting it inherited would make it wait for a server that
+	// does not exist: every write would stop at the moment of a failover, which
+	// is the moment it must not. The marker is left alone so `ha status` can
+	// still say it was asked for, and `ha enable` puts it back.
+	if SyncOn() || SyncActive() {
+		if err := clearSyncOnPrimary(); err != nil {
+			fmt.Printf("\nWARNING: the promoted standby still has synchronous_standby_names set (%v),\n"+
+				"so it is waiting for a standby it does not have and writes will not complete.\n"+
+				"Clear it now:\n  %s ha sync off\n\n", err, brand.CLI)
+		} else {
+			fmt.Printf("zero-data-loss mode is off while there is one copy: `%s ha enable` builds a new\n"+
+				"standby and puts it back.\n", brand.CLI)
+		}
+	}
 	fmt.Println("failover complete: standby promoted; 'main' now routes to it via the proxy")
 	fmt.Println("to move 'main' back to its own container later, keeping every write: fox ha failback")
 	return nil
@@ -407,6 +471,15 @@ func HADisable() error {
 			"on the primary until it is gone. Drop it from `%s psql main` with:\n"+
 			"  SELECT pg_drop_replication_slot('%s');\n",
 			StandbySlot, err, brand.CLI, StandbySlot)
+	}
+	// No standby left to wait for. Clearing the setting is what keeps the
+	// database writable; clearing the marker is honest, because `ha disable` is
+	// somebody saying they do not want a second copy at all.
+	if SyncOn() || SyncActive() {
+		if err := SyncDisable(); err != nil {
+			return fmt.Errorf("the standby is gone but commits are still waiting for it: %w\n"+
+				"Clear it by hand: ALTER SYSTEM RESET synchronous_standby_names; SELECT pg_reload_conf();", err)
+		}
 	}
 	activeStorage().destroyStandby()
 	return setPrimary("main")
@@ -554,6 +627,14 @@ func HAFailback() error {
 	fmt.Println("5/5 removing the old standby…")
 	quiet("docker", "rm", "-f", standby)
 	store.destroyStandby()
+	// main is a primary again with no standby, so nothing may be waiting for
+	// one. The marker stays: `ha enable` below puts the mode back.
+	if SyncActive() {
+		if err := clearSyncOnPrimary(); err != nil {
+			fmt.Printf("\nWARNING: 'main' is still waiting for a standby that has been removed (%v).\n"+
+				"Writes will not complete until this is cleared:\n  %s ha sync off\n\n", err, brand.CLI)
+		}
+	}
 
 	fmt.Println("failback complete: 'main' is served by its own container again, with every write made during the failover.")
 	fmt.Println("  WAL archiving has resumed. Take a fresh base backup now: fox backup create")
