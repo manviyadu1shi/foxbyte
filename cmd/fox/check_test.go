@@ -67,3 +67,88 @@ type errTargetForTest struct{}
 func (errTargetForTest) Error() string {
 	return "/home/a/.fox/backup-target.json: unexpected end of JSON input"
 }
+
+// What a commit means, and the one case where this line has to shout.
+func TestDurabilityLine(t *testing.T) {
+	never := func() bool { return false }
+	met := func() bool { return true }
+
+	t.Run("waiting for a standby nothing counts is a failure, not a warning", func(t *testing.T) {
+		// The database looks hung from outside: every commit is waiting and
+		// none will complete. This is the line somebody reads when that
+		// happens, so it has to say so and carry the way out.
+		got := durabilityLine(branch.HAState{Enabled: true, Sync: true, SyncActive: true}, never)
+		if got.state != stateFail {
+			t.Fatalf("state %d, want a failure", got.state)
+		}
+		for _, want := range []string{"every commit is waiting", "will not complete"} {
+			if !strings.Contains(got.detail, want) {
+				t.Errorf("detail %q does not mention %q", got.detail, want)
+			}
+		}
+		if !strings.Contains(got.fix, "ha sync off") {
+			t.Errorf("fix %q does not name the command that releases them", got.fix)
+		}
+		// And it says the escape hatch works *now*, which is the question
+		// somebody staring at a stalled database actually has.
+		if !strings.Contains(got.fix, "while they are waiting") {
+			t.Errorf("fix %q does not say it works while commits are stalled", got.fix)
+		}
+	})
+
+	t.Run("in effect and counted is fine, and names what it bought", func(t *testing.T) {
+		got := durabilityLine(branch.HAState{Enabled: true, Sync: true, SyncActive: true}, met)
+		if got.state != stateOK {
+			t.Fatalf("state %d, want ok", got.state)
+		}
+		if !strings.Contains(got.detail, "zero data loss") {
+			t.Errorf("detail %q does not say what it bought", got.detail)
+		}
+	})
+
+	t.Run("asked for but not in effect warns, because the buyer thinks they have it", func(t *testing.T) {
+		// The dangerous silence: somebody bought RPO zero, a failover took it
+		// away, and nothing said so. Not a failure — the database is healthy.
+		got := durabilityLine(branch.HAState{Enabled: false, Sync: true}, never)
+		if got.state != stateWarn {
+			t.Fatalf("state %d, want a warning", got.state)
+		}
+		if !strings.Contains(got.detail, "not in effect") {
+			t.Errorf("detail %q does not say it is not in effect", got.detail)
+		}
+		if !strings.Contains(got.fix, "ha enable") {
+			t.Errorf("fix %q does not name the way back", got.fix)
+		}
+	})
+
+	t.Run("nobody asked, so say what the default costs", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			ha   branch.HAState
+		}{
+			{"with a standby", branch.HAState{Enabled: true}},
+			{"without one", branch.HAState{}},
+		} {
+			got := durabilityLine(c.ha, never)
+			if got.state != stateOK {
+				t.Errorf("%s: state %d, want ok", c.name, got.state)
+			}
+			if !strings.Contains(got.detail, "never wait") {
+				t.Errorf("%s: detail %q does not say commits never wait", c.name, got.detail)
+			}
+		}
+	})
+
+	t.Run("the quorum is only asked about when it decides the answer", func(t *testing.T) {
+		// Asking Postgres costs a `docker exec psql`, and three of the four
+		// cases do not need it.
+		asked := 0
+		counting := func() bool { asked++; return true }
+		for _, ha := range []branch.HAState{{}, {Enabled: true}, {Sync: true}} {
+			durabilityLine(ha, counting)
+		}
+		if asked != 0 {
+			t.Errorf("Postgres was asked %d time(s) for a case that does not need it", asked)
+		}
+	})
+}

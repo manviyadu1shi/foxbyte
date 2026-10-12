@@ -704,7 +704,7 @@ func branchCmd(args []string) {
 // haCmd dispatches `fox ha <subcommand>`.
 func haCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: fox ha <enable|status|failover|disable|failback>")
+		fmt.Printf("usage: %s ha <enable|status|failover|disable|failback|sync on|sync off>\n", brand.CLI)
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -718,8 +718,34 @@ func haCmd(args []string) {
 		must(branch.HADisable())
 	case "failback":
 		must(branch.HAFailback())
+	case "sync":
+		haSyncCmd(args[1:])
 	default:
 		fmt.Printf("unknown ha subcommand: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+// haSyncCmd is zero-data-loss mode: `on` makes every commit wait for the
+// standby, `off` releases them. Spelled as two words rather than a flag on
+// `ha enable` because it is a decision about what a commit means, taken and
+// untaken independently of whether a standby exists.
+func haSyncCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Printf("usage: %s ha sync <on|off>\n\n"+
+			"on   a commit is not reported until the standby has it on disk. No write is\n"+
+			"     lost if this machine dies, and every write waits for the second one.\n"+
+			"off  commits never wait. A lost machine costs up to 60 seconds of writes.\n\n"+
+			"`%s ha status` says which is in effect.\n", brand.CLI, brand.CLI)
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "on":
+		must(branch.SyncEnable())
+	case "off":
+		must(branch.SyncDisable())
+	default:
+		fmt.Printf("unknown: %s ha sync %s — expected on or off\n", brand.CLI, args[0])
 		os.Exit(2)
 	}
 }

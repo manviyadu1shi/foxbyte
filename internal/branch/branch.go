@@ -393,9 +393,17 @@ func Init() error {
 	// After `fox ha failover` the promoted standby is the primary; the old main
 	// must stay stopped.
 	if PrimaryContainer() == container("standby") {
-		return ensurePromotedStandby()
+		if err := ensurePromotedStandby(); err != nil {
+			return err
+		}
+		guardSyncAtStartup()
+		return nil
 	}
 	if ContainerState("main") == "running" {
+		// Before the first write, and before anything below it: see
+		// guardSyncAtStartup. A commit that waits for a standby `fox stop`
+		// removed never returns, and every line after this one is a commit.
+		guardSyncAtStartup()
 		if err := syncRolePassword("main"); err != nil { // ensure the role matches the generated secret
 			return err
 		}
@@ -421,6 +429,10 @@ func Init() error {
 	if err := waitReady("main"); err != nil {
 		return err
 	}
+	// The same guard as the already-running path above, for the same reason:
+	// main has just come up carrying whatever postgresql.auto.conf says, and
+	// everything below this line is a commit.
+	guardSyncAtStartup()
 	// The data dir may have been initialized with a different POSTGRES_PASSWORD
 	// (an older install, or before per-install secrets existed). Sync the role
 	// password to the generated secret so the gateway's TCP login matches.

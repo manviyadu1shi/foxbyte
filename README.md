@@ -411,7 +411,16 @@ fox ha status
 fox ha failover                 # promote the standby; 'main' reroutes to it
 fox ha disable
 fox ha failback                 # after a failover: back to main's own container, keeping every write
+fox ha sync on | off            # zero data loss: a commit waits for the standby
 ```
+
+Replication is asynchronous by default: commits never wait, and losing the
+machine costs up to a minute of writes (`archive_timeout=60`). `fox ha sync on`
+trades the first for the second — the primary holds a commit until the standby
+has it on disk, so nothing is lost, and every write is slower by the round trip
+to the standby. There is one standby, so **if it stops, writes stop**;
+`fox ha sync off` releases them and works while they are waiting. `fox check`
+carries a **durability** line saying which of the two is in effect.
 
 **Accounts & keys**
 

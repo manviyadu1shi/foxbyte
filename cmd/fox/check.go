@@ -67,7 +67,7 @@ func checkCmd(args []string) {
 	lines = append(lines, checkServers()...)
 	lines = append(lines, checkPorts()...)
 	lines = append(lines, checkAPI(), checkAPIClosed(), checkBlackbox(), checkAnchors(), checkRealtime(),
-		checkBackupTarget(), checkBackups(), checkRestore(), checkSampleData())
+		checkDurability(), checkBackupTarget(), checkBackups(), checkRestore(), checkSampleData())
 
 	failed, warned := 0, 0
 	for _, l := range lines {
@@ -385,6 +385,42 @@ func checkRealtime() checkLine {
 // have put anything in the database. It is also the single largest reduction
 // in how much data an incident can cost, and it needs no new code to fix —
 // which is why it is said on every `check` until it is done.
+// checkDurability reports what a commit means, and shouts when commits cannot
+// complete.
+//
+// The failing case is the reason this line exists: zero-data-loss mode in
+// effect with nothing counted means every write is waiting and will wait
+// forever, which from the outside looks like the database has hung. `fox check`
+// is where somebody looks when that happens, and the one command that releases
+// them has to be on the screen.
+func checkDurability() checkLine { return durabilityLine(branch.HAInfo(), branch.SyncQuorumMet) }
+
+// durabilityLine is the judgement, given the state and a way to ask whether the
+// standby is actually counted. A function rather than a bool so the question is
+// only put to Postgres in the one case that needs it — and so this is testable
+// without a pool, which the state behind it is not.
+func durabilityLine(ha branch.HAState, quorumMet func() bool) checkLine {
+	switch {
+	case ha.SyncActive && !quorumMet():
+		return fail("durability",
+			"zero-data-loss mode is on but no standby is being counted — every commit is waiting "+
+				"and will not complete",
+			fmt.Sprintf("%s ha sync off   — releases them; it works while they are waiting", brand.CLI))
+	case ha.SyncActive:
+		return ok("durability", fmt.Sprintf("zero data loss: a commit waits until %s has it on disk",
+			branch.StandbyName))
+	case ha.Sync:
+		return warn("durability",
+			"zero-data-loss mode was asked for but is not in effect — there is no standby to wait for, "+
+				"so a lost machine still costs up to 60s of writes",
+			fmt.Sprintf("%s ha enable   — then it comes back on its own", brand.CLI))
+	case ha.Enabled:
+		return ok("durability", "asynchronous replication: commits never wait, and a lost machine costs "+
+			"up to 60s of writes")
+	}
+	return ok("durability", "single copy: commits never wait, and the WAL archive is the only second copy")
+}
+
 func checkBackupTarget() checkLine { return backupTargetLine(branch.CurrentTarget()) }
 
 // backupTargetLine is the judgement, separated from reading the file so it can
