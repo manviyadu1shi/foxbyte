@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -63,11 +64,34 @@ func NewDecoder(ctx context.Context, dsn, slot, publication string, hub *Hub) (*
 // EnsureSlot creates the slot if it is not there. Idempotent, because a
 // subscriber reconnecting must land on the slot it left behind — that is what
 // it resumes from.
-func (d *Decoder) EnsureSlot(ctx context.Context) error {
+//
+// failover asks for a slot that survives a promotion. It is applied with
+// ALTER_REPLICATION_SLOT rather than as an option on the create, because that
+// one call covers the slot this call just made *and* every slot made before
+// this code existed — a subscriber that has been running since before the
+// upgrade is exactly the one whose position is worth keeping. Only the engine
+// knows whether the running major has it (branch.SlotSyncSupported); on 16 the
+// command is a syntax error.
+func (d *Decoder) EnsureSlot(ctx context.Context, failover bool) error {
 	_, err := pglogrepl.CreateReplicationSlot(ctx, d.conn, d.slot, "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{Temporary: false})
 	if err != nil && !isDuplicateSlot(err) {
 		return fmt.Errorf("creating the replication slot %s: %w", d.slot, err)
+	}
+	if !failover {
+		return nil
+	}
+	// Not fatal, and not silent either.
+	//
+	// A slot that is not failover-aware still streams every change correctly;
+	// all it loses is its position across a promotion, which costs its
+	// subscriber one refetch after a failover that may never happen. Refusing
+	// to start the feed over that would trade a working feature for a
+	// resilience one. So it is logged, and `fox realtime slots` says of every
+	// slot whether it survives a failover — a degradation nobody can see is the
+	// thing worth avoiding here, not the degradation.
+	if _, err := d.conn.Exec(ctx, "ALTER_REPLICATION_SLOT "+d.slot+" (FAILOVER)").ReadAll(); err != nil {
+		log.Printf("change feed: %s is not failover-aware (%v); its subscribers will refetch after a failover", d.slot, err)
 	}
 	return nil
 }

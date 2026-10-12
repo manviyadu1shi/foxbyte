@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/thefoxbyte/foxbyte/internal/brand"
 )
 
 // HAState summarises high-availability status for the dashboard/API.
@@ -102,7 +104,138 @@ func allowReplication(primary string) error {
 // archive_mode is a postmaster setting, so it has to be here rather than
 // reloaded at promotion time.
 func startStandbyContainer(store storage) error {
+	// The slot the standby streams through, made here rather than at `ha
+	// enable` so that every path which starts a standby has it: `ha enable`,
+	// and the restart `realtime setup` does on an install that already has one.
+	//
+	// Skipped when this container *is* the primary — after a failover the
+	// promoted standby is started by this same function, and a slot named
+	// fox_standby on it would point a server at itself.
+	if standbySlotWanted() {
+		if primary := PrimaryContainer(); primary != container("standby") {
+			if err := ensureStandbySlot(primary); err != nil {
+				return err
+			}
+		}
+	}
 	return run("docker", standbyRunArgs(store.standbyPath())...)
+}
+
+// StandbySlot is the physical replication slot a standby holds on its primary.
+//
+// Deliberately outside SlotPrefix: the change feed's slots are swept, listed
+// and dropped by name prefix, and this one must never be caught by any of that
+// — losing it would leave the standby without the slot that slot
+// synchronisation depends on.
+const StandbySlot = "fox_standby"
+
+// standbySlotWanted reports whether this install needs the physical slot, and
+// it is the same switch as the rest of slot synchronisation on purpose.
+//
+// A physical slot is not free: it holds WAL on the primary for a standby that
+// may be gone, and with the feed off there is no max_slot_wal_keep_size to
+// bound it — so on an install that does not stream changes it would trade "a
+// dead standby needs rebuilding" for "a dead standby fills the primary's
+// disk". That is not a trade to make for a feature such an install does not
+// use. With the feed on the budget is set and bounds it, and the slot is what
+// synchronisation needs.
+//
+// So with the feed off, or on a major without failover-aware slots, a base
+// backup is byte-for-byte the command it has always been.
+func standbySlotWanted() bool { return RealtimeOn() && SlotSyncSupported() }
+
+// baseBackupArgs is how a standby is built from its primary.
+//
+// conninfoDB asks for a database name in the recovery settings the backup
+// writes; false gives the argument list this has always used, which is what an
+// install without the change feed still gets.
+//
+// Why -d rather than -h/-U: pg_basebackup -R copies the parameters it connected
+// with into primary_conninfo, and -h/-U produce a conninfo with no database
+// name — checked, not assumed. Slot synchronisation needs one, because the
+// worker on the standby connects to a database on the primary to read its
+// slots; without it, it logs a warning and silently never syncs, which is the
+// worst of both outcomes.
+//
+// What is deliberately NOT here is -S. The standby needs a physical slot, but
+// pointing the *backup* at one makes the backup fail for a reason that has
+// nothing to do with it:
+//
+//	pg_basebackup: error: could not send replication command "START_REPLICATION":
+//	  ERROR: can no longer access replication slot "fox_standby"
+//	  DETAIL: This replication slot has been invalidated due to "wal_removed".
+//
+// A slot that reserves write-ahead log from the moment it is made is subject to
+// max_slot_wal_keep_size from that moment too, so on a busy primary with a
+// small budget it can be invalidated in the seconds between being created and
+// the backup's WAL streamer connecting — and then `ha enable` cannot build a
+// standby at all. The standby is told its slot on its own command line
+// instead (standbyRunArgs), and the slot reserves nothing until the standby
+// connects to it. Pure, so both shapes are tested without a pool.
+func baseBackupArgs(from, dataDir string, conninfoDB bool) []string {
+	if !conninfoDB {
+		return []string{
+			"pg_basebackup", "-h", from, "-U", pgUser, "-D", dataDir,
+			"-R", "-X", "stream", "-c", "fast",
+		}
+	}
+	conninfo := fmt.Sprintf("host=%s user=%s dbname=%s", from, pgUser, pgDatabase)
+	return []string{
+		"pg_basebackup", "-d", conninfo, "-D", dataDir,
+		"-R", "-X", "stream", "-c", "fast",
+	}
+}
+
+// ensureStandbySlot creates the standby's physical slot on the server it
+// streams from, if it is not already there.
+//
+// Idempotent because every caller can run twice: `ha enable` is how a standby
+// is rebuilt, and `realtime setup` restarts the standby on an install that
+// already has one.
+//
+// It reserves no write-ahead log until the standby connects (the `false`), and
+// that is the whole point. A slot that reserves from creation is subject to
+// max_slot_wal_keep_size from creation, which is how the first version of this
+// made `ha enable` fail outright — see baseBackupArgs. Nothing is lost by
+// waiting: the WAL the standby needs next is already in its own pg_wal, put
+// there by the base backup's -X stream.
+//
+// server is a container name, reached the way allowReplication reaches it.
+func ensureStandbySlot(server string) error {
+	return slotSQL(server, "SELECT pg_create_physical_replication_slot('"+StandbySlot+"', false)"+
+		" WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '"+StandbySlot+"')")
+}
+
+// dropStandbySlot removes it on teardown, and only while it is inactive —
+// dropping one out from under a live walsender is Postgres's refusal to make,
+// not ours. `fox up` sweeps nothing outside SlotPrefix, so this is the only
+// thing that cleans it up.
+func dropStandbySlot(server string) error {
+	return slotSQL(server, "SELECT pg_drop_replication_slot('"+StandbySlot+"')"+
+		" WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '"+StandbySlot+"' AND NOT active)")
+}
+
+// dropStandbySlotIfUp is the same, and says nothing at all when there is no
+// running primary to ask.
+func dropStandbySlotIfUp(server string) error {
+	if ContainerState("main") != "running" {
+		return nil
+	}
+	return dropStandbySlot(server)
+}
+
+// slotSQL runs one statement on a container by name, the way allowReplication
+// reaches one, and keeps psql's rendered result out of the way: these return a
+// row and `ha enable` printed a two-line table for each in the middle of its
+// own output. Captured rather than streamed, so a failure still carries the
+// message Postgres gave.
+func slotSQL(server, sql string) error {
+	out, err := captureCombined("docker", "exec", "--env-file", pgEnvFile(), server,
+		"psql", "-U", pgUser, "-d", pgDatabase, "-tAq", "-v", "ON_ERROR_STOP=1", "-c", sql)
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // standbyRunArgs builds the standby's `docker run` arguments. Separate from
@@ -126,8 +259,19 @@ func standbyRunArgs(dataPath string) []string {
 	// this standby is a primary in waiting, and one started without them would
 	// come up after a failover unable to decode. Realtime would stop working at
 	// the worst possible moment and for no visible reason.
-	args = append(args, pgImage())
-	return append(args, postgresArgs(true)...)
+	img := pgImage()
+	args = append(args, img)
+	args = append(args, postgresArgs(true, imageMajor(img))...)
+	// The slot this standby streams through, which is what sync_replication_slots
+	// needs in order to know how far the standby has got. On the command line
+	// rather than written into PGDATA by pg_basebackup -R, because a backup that
+	// streams through the slot fails when the slot is invalidated for falling
+	// behind — see baseBackupArgs. A command-line setting also outranks
+	// postgresql.auto.conf, so this is the one answer.
+	if standbySlotWanted() {
+		args = append(args, "-c", "primary_slot_name="+StandbySlot)
+	}
+	return args
 }
 
 // HAEnable provisions a hot standby streaming from the current primary.
@@ -152,17 +296,19 @@ func HAEnable() error {
 		return err
 	}
 
-	// 3. Base backup from the primary, with recovery config (-R) and streaming WAL.
-	if err := run("docker", "run", "--rm", "--user", pgUID, "--network", network,
+	// 3. Base backup from the primary, with recovery config (-R) and streaming
+	// WAL. The standby's replication slot is deliberately not involved here;
+	// see baseBackupArgs.
+	if err := run("docker", append([]string{"run", "--rm", "--user", pgUID, "--network", network,
 		"--env-file", pgEnvFile(),
-		"-v", store.standbyPath()+":/data",
-		pgImage(),
-		"pg_basebackup", "-h", primary, "-U", pgUser, "-D", "/data/pgdata",
-		"-R", "-X", "stream", "-c", "fast"); err != nil {
+		"-v", store.standbyPath() + ":/data",
+		pgImage()},
+		baseBackupArgs(primary, "/data/pgdata", standbySlotWanted())...)...); err != nil {
 		return err
 	}
 
-	// 4. Start the standby — it streams from the primary named in primary_conninfo.
+	// 4. Start the standby — it streams from the primary named in
+	// primary_conninfo, through the slot startStandbyContainer makes for it.
 	if err := startStandbyContainer(store); err != nil {
 		return err
 	}
@@ -242,10 +388,26 @@ func HAFailover() error {
 
 // HADisable tears down the standby and resets primary routing to "main".
 func HADisable() error {
-	if err := haGuard("disable", PrimaryContainer()); err != nil {
+	primary := PrimaryContainer()
+	if err := haGuard("disable", primary); err != nil {
 		return err
 	}
 	quiet("docker", "rm", "-f", container("standby"))
+	// The standby's slot, now that the standby it was holding WAL for is gone.
+	// A slot nobody will consume holds write-ahead log that cannot be reclaimed.
+	//
+	// Only when the primary is up to be asked: `fox stop` then `fox ha disable`
+	// is a reasonable thing to do, and warning there about a slot that cannot
+	// even be looked for would be noise. Not fatal either, because the
+	// walsender may take a moment to notice its container has gone, and failing
+	// here would leave an install half torn down — so it is named instead.
+	// haGuard has already refused a promoted standby, so the primary is main.
+	if err := dropStandbySlotIfUp(primary); err != nil {
+		fmt.Printf("The replication slot %q could not be dropped (%v). It holds write-ahead log\n"+
+			"on the primary until it is gone. Drop it from `%s psql main` with:\n"+
+			"  SELECT pg_drop_replication_slot('%s');\n",
+			StandbySlot, err, brand.CLI, StandbySlot)
+	}
 	activeStorage().destroyStandby()
 	return setPrimary("main")
 }
@@ -327,12 +489,16 @@ func HAFailback() error {
 	if err := run("chown", "-R", pgUID+":"+pgUID, mountpoint("main")); err != nil {
 		return stopped(err)
 	}
-	if err := run("docker", "run", "--rm", "--user", pgUID, "--network", network,
+	// No replication slot for this one. main is about to run as a temporary
+	// standby of the promoted standby, started by startContainer, which does
+	// not name a slot — so one made here would reserve WAL that nothing reads.
+	// A failback is minutes long and ends with main as a primary again; the new
+	// standby that `ha enable` then builds gets the slot.
+	if err := run("docker", append([]string{"run", "--rm", "--user", pgUID, "--network", network,
 		"--env-file", pgEnvFile(),
-		"-v", mountpoint("main")+":/data",
-		pgImage(),
-		"pg_basebackup", "-h", standby, "-U", pgUser, "-D", "/data/pgdata",
-		"-R", "-X", "stream", "-c", "fast"); err != nil {
+		"-v", mountpoint("main") + ":/data",
+		pgImage()},
+		baseBackupArgs(standby, "/data/pgdata", standbySlotWanted())...)...); err != nil {
 		return stopped(err)
 	}
 

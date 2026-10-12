@@ -55,11 +55,11 @@ func TestWithTheFeedOffTheArgumentsAreUnchanged(t *testing.T) {
 		"-c", "archive_timeout=60",
 		"-c", "listen_addresses=*",
 	}
-	if got := postgresArgs(true); !reflect.DeepEqual(got, wantPrimary) {
+	if got := postgresArgs(true, PGMajor); !reflect.DeepEqual(got, wantPrimary) {
 		t.Errorf("primary args changed\n got: %q\nwant: %q", got, wantPrimary)
 	}
 	// And a branch gets no command line at all, so the image's own default runs.
-	if got := postgresArgs(false); got != nil {
+	if got := postgresArgs(false, PGMajor); got != nil {
 		t.Errorf("a branch was given a command line with the feed off: %q", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestWithTheFeedOffTheArgumentsAreUnchanged(t *testing.T) {
 // named once, with the new value.
 func TestWithTheFeedOnThePrimaryGainsOnlyWhatItNeeds(t *testing.T) {
 	realtimeOnFor(t)
-	got := postgresArgs(true)
+	got := postgresArgs(true, PGMajor)
 
 	if n := strings.Count(strings.Join(got, " "), "wal_level="); n != 1 {
 		t.Errorf("wal_level appears %d times, want exactly 1: %q", n, got)
@@ -91,7 +91,7 @@ func TestWithTheFeedOnThePrimaryGainsOnlyWhatItNeeds(t *testing.T) {
 // it or docker takes the first flag for the command.
 func TestWithTheFeedOnABranchIsGivenACommandLine(t *testing.T) {
 	realtimeOnFor(t)
-	got := postgresArgs(false)
+	got := postgresArgs(false, PGMajor)
 	if len(got) == 0 || got[0] != "postgres" {
 		t.Fatalf("a branch's command line must start with postgres: %q", got)
 	}
@@ -175,6 +175,10 @@ func containsArg(args []string, want string) bool {
 // A standby is a primary in waiting. Started without the feed's settings it
 // would come up after a failover unable to decode, and realtime would stop
 // working at the worst possible moment and for no visible reason.
+//
+// The primary's whole command line has to be there, contiguously and in order:
+// the standby may carry more (its own slot, when slot synchronisation is in
+// play) but never less and never different.
 func TestTheStandbyGetsWhatThePrimaryGets(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		func() {
@@ -184,68 +188,12 @@ func TestTheStandbyGetsWhatThePrimaryGets(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			standby := standbyRunArgs("/tmp/x")
-			want := postgresArgs(true)
-			// The standby's run args end with the postgres command line.
-			if len(standby) < len(want) {
-				t.Fatalf("standby args are shorter than the primary's command line: %q", standby)
-			}
-			got := standby[len(standby)-len(want):]
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("realtime=%v: standby\n got: %q\nwant: %q", on, got, want)
+			standby := strings.Join(standbyRunArgs("/tmp/x"), "\x00")
+			want := strings.Join(postgresArgs(true, imageMajor(pgImage())), "\x00")
+			if !strings.Contains(standby, want) {
+				t.Errorf("realtime=%v: the standby does not run the primary's command line\n got: %q\nwant: %q",
+					on, strings.ReplaceAll(standby, "\x00", " "), strings.ReplaceAll(want, "\x00", " "))
 			}
 		}()
-	}
-}
-
-// After a failover the container serving "main" is the promoted standby, and
-// every realtime helper reaches Postgres by container name. RealtimeDSN
-// resolved that by address from the start; the rest did not, so a feed on
-// "main" after a failover could not be set up or read — the decoder's first
-// statement execs into a stopped container, fails, and retries until it gives
-// up, with nothing on the stream to say why.
-func TestServingBranchFollowsAFailover(t *testing.T) {
-	servingPrimary = func() string { return "standby" }
-	t.Cleanup(func() { servingPrimary = primaryBranch })
-
-	if got := ServingBranch("main"); got != "standby" {
-		t.Errorf(`ServingBranch("main") = %q, want the promoted standby`, got)
-	}
-	if got := ServingBranch(""); got != "standby" {
-		t.Errorf(`ServingBranch("") = %q: an empty name means main`, got)
-	}
-	// Any other branch is itself. A failover moves "main" and nothing else, and
-	// a helper that redirected an ordinary branch would read the wrong database.
-	if got := ServingBranch("reports"); got != "reports" {
-		t.Errorf(`ServingBranch("reports") = %q, want it untouched`, got)
-	}
-
-	servingPrimary = func() string { return "main" }
-	if got := ServingBranch("main"); got != "main" {
-		t.Errorf(`ServingBranch("main") = %q with no failover, want "main"`, got)
-	}
-}
-
-// Both commands restart whichever container is serving main, so both are
-// refused while that is a promoted standby — and the refusal has to name the
-// command that resolves it, because a person who has just failed over is not
-// in a position to guess.
-func TestRealtimeHAGuard(t *testing.T) {
-	servingPrimary = func() string { return "standby" }
-	t.Cleanup(func() { servingPrimary = primaryBranch })
-
-	for _, action := range []string{"setup", "teardown"} {
-		err := RealtimeHAGuard(action)
-		if err == nil {
-			t.Fatalf("RealtimeHAGuard(%q) allowed it while failed over", action)
-		}
-		if !strings.Contains(err.Error(), "ha failback") {
-			t.Errorf("RealtimeHAGuard(%q) = %q, want it to name `ha failback`", action, err)
-		}
-	}
-
-	servingPrimary = func() string { return "main" }
-	if err := RealtimeHAGuard("setup"); err != nil {
-		t.Errorf("RealtimeHAGuard refused with no failover: %v", err)
 	}
 }

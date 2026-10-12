@@ -103,3 +103,32 @@ func majorWayOut(data string) string {
 	return fmt.Sprintf("Run it on its own major instead: unset %s, or set it to %s.",
 		brand.EnvName("PG_IMAGE"), PostgresImageFor(data))
 }
+
+// SlotSyncMajor is the first PostgreSQL major that can carry a logical
+// replication slot across a promotion: 17 added failover-aware slots, the
+// `sync_replication_slots` setting and `ALTER_REPLICATION_SLOT`.
+const SlotSyncMajor = 17
+
+// slotSyncSupported reports whether a major has failover-aware slots.
+//
+// An unknown major — which is what imageMajor answers for an override tag it
+// cannot read — counts as no, and that direction is deliberate. On a 16 image
+// `sync_replication_slots` is not a setting Postgres has ever heard of, and an
+// unrecognised configuration parameter is fatal: the container exits with
+// "FATAL: unrecognized configuration parameter", which inside docker is a
+// database that simply never comes up. Guessing yes breaks an install;
+// guessing no costs a subscriber one refetch after a failover it may never
+// have.
+func slotSyncSupported(major string) bool {
+	return major != "" && majorNum(major) >= SlotSyncMajor
+}
+
+// SlotSyncSupported reports whether this install's engine has failover-aware
+// slots. One answer for the whole feature, asked of the image rather than of a
+// live server on purpose: the settings in postgresArgs are chosen before any
+// server exists to ask, and a slot marked for failover on a primary whose
+// standby is not synchronising slots would look like it worked and do nothing.
+// Either both halves are in play or neither is.
+func SlotSyncSupported() bool {
+	return slotSyncSupported(imageMajor(pgImage()))
+}

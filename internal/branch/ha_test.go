@@ -124,3 +124,78 @@ func TestStandbyRunArgsArchive(t *testing.T) {
 		t.Error("archive_mode=always would double-archive while the primary is still archiving")
 	}
 }
+
+// The base backup is the command it has always been, verbatim, on an install
+// without the change feed.
+//
+// The point of writing it out rather than computing it: this is what every
+// install that does not stream changes runs, and it is not to change because a
+// feature that install does not have needed something.
+func TestBaseBackupWithoutTheFeedIsUnchanged(t *testing.T) {
+	want := []string{
+		"pg_basebackup", "-h", "pg-main", "-U", pgUser, "-D", "/data/pgdata",
+		"-R", "-X", "stream", "-c", "fast",
+	}
+	got := baseBackupArgs("pg-main", "/data/pgdata", false)
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("base backup arguments changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// With slot synchronisation it differs in exactly one way: the recovery
+// settings it writes carry a database name, because the worker on the standby
+// connects to a database on the primary to read its slots and -h/-U produce a
+// conninfo without one.
+//
+// And it still does not name a slot. pg_basebackup -S streams the backup's WAL
+// through that slot, and a slot invalidated for falling past
+// max_slot_wal_keep_size then fails the whole backup with "can no longer access
+// replication slot" — which is how the first version of this stopped `ha
+// enable` from building a standby at all. The standby is told its slot on its
+// own command line.
+func TestBaseBackupNamesADatabaseAndNotASlot(t *testing.T) {
+	got := baseBackupArgs("pg-main", "/data/pgdata", true)
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"dbname=" + pgDatabase, "host=pg-main", "user=" + pgUser, "-R", "-X stream"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("base backup is missing %q\ngot: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, " -S ") || strings.Contains(joined, " -C") {
+		t.Errorf("the backup must not stream through the standby's slot: %s", joined)
+	}
+	// -h and -U are alternatives to -d; passing both lets one win silently.
+	if strings.Contains(joined, " -h ") {
+		t.Errorf("both -d and -h were passed: %s", joined)
+	}
+}
+
+// The standby is told its slot on its own command line, and only when slot
+// synchronisation is in play — otherwise it streams as it always has.
+func TestStandbyIsToldItsSlotOnTheCommandLine(t *testing.T) {
+	realtimeOff(t)
+	if args := strings.Join(standbyRunArgs("/data/standby"), " "); strings.Contains(args, "primary_slot_name") {
+		t.Errorf("a standby was given a slot with the feed off: %s", args)
+	}
+}
+
+// The standby's slot is not one of the change feed's, and must never be swept,
+// listed or dropped as one. A sweep that caught it would leave the standby
+// unable to stream at all.
+func TestStandbySlotIsNotAFeedSlot(t *testing.T) {
+	if strings.HasPrefix(StandbySlot, SlotPrefix) {
+		t.Errorf("%q starts with %q, so the feed's sweep would drop it", StandbySlot, SlotPrefix)
+	}
+	if err := DropRealtimeSlot("main", StandbySlot); err == nil {
+		t.Error("DropRealtimeSlot accepted the standby's slot")
+	}
+}
+
+// And the slot is only asked for when the feed is on and the major can
+// synchronise it, so an install that does not stream changes is untouched.
+func TestStandbySlotFollowsTheFeed(t *testing.T) {
+	realtimeOff(t)
+	if standbySlotWanted() {
+		t.Error("a standby slot was wanted with the change feed off")
+	}
+}

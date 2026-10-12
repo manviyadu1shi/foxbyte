@@ -94,6 +94,18 @@ assert_contains "the licence unlocks this build" "$("$S" version)" "features lic
 "$S" stop >/dev/null 2>&1; sleep 1
 "$S" start >/dev/null 2>&1; sleep 5; main_ready
 
+# And put HA back where this suite expects to find it.
+#
+# A run that was interrupted after section 12's failover leaves 'main' served
+# by the promoted standby, and `fox start` then brings that standby up -- which
+# is right, and is not what this suite starts from. Section 12's `ha enable` is
+# refused in that state, every assertion after it fails for that one reason,
+# and the count was fifty-two. Both of these are no-ops on an install that is
+# already where it should be.
+"$S" ha failback >/dev/null 2>&1
+"$S" ha disable >/dev/null 2>&1
+main_ready
+
 # Now that Postgres is running, clear anything the last run left behind. A run
 # killed mid-stream leaves an active slot, and `realtime teardown` rightly
 # refuses to pull one out from under a live subscriber -- correct for a person,
@@ -533,8 +545,22 @@ kill "$GWPID" 2>/dev/null
 
 # `fox check` is where somebody looks when a slot is holding WAL and nothing is
 # draining it. The slot on rtfeed is idle now, which is the case worth a word.
+#
+# Asked while the branch is up, which is the whole difficulty: `check` reports
+# slots on *running* branches, and this branch suspends as soon as its last
+# subscriber leaves -- the behaviour asserted two assertions ago. So a brief
+# subscriber resumes it and `check` follows immediately, and the pair is retried
+# because the reaper may still win the race. Without the retry this assertion
+# passes or fails on how fast the machine is, which it did: twice each way.
 "$S" up >/dev/null 2>&1
-CHECK="$("$S" check 2>&1 | grep 'change feed')"
+CHECK=""
+for _ in $(seq 1 5); do
+  ( curl -skN --max-time 3 -H "Authorization: Bearer $KEY" \
+      "$API/api/branches/rtfeed/realtime" >/dev/null 2>&1 ) &
+  sleep 4; wait 2>/dev/null
+  CHECK="$("$S" check 2>&1 | grep 'change feed')"
+  case "$CHECK" in *idle*) break;; esac
+done
 assert_contains "\`check\` reports the feed" "$CHECK" "change feed"
 assert_contains "…and names the idle slot it found" "$CHECK" "idle"
 
@@ -686,20 +712,109 @@ VERIFY="$("$S" backup verify 2>&1)"; VRC=$?
 assert_eq "…and a restore from it is proved to work" "$VRC" "0"
 sudo docker rm -f pg-restore >/dev/null 2>&1
 
-"$S" ha enable >/dev/null 2>&1; sleep 3
+# Kept, like the failback below: when a standby fails to build, every assertion
+# in the rest of this section fails for that one reason and none of them says
+# so. The first run of the slot-synchronisation assertions below reported
+# fifteen failures across this section, all of them one base backup that had
+# refused -- and the message saying why went to /dev/null from this line.
+#
+# The whole log, not a tail of it: pg_basebackup's own last line is "background
+# process terminated unexpectedly", and the error that actually matters is what
+# the background process said two lines earlier.
+"$S" ha enable >/tmp/rt-ha-enable.log 2>&1 || {
+  echo "  (ha enable failed:)"; sed 's/^/    /' /tmp/rt-ha-enable.log
+}
+sleep 3
 assert_eq "a standby streams from a logical primary" \
   "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
 # A standby is a primary in waiting, and its command line is fixed when its
 # container is made. One built before `realtime setup` would come up after a
 # failover unable to decode at all -- and RealtimeHAGuard then refuses the
 # setup that would fix it until a failback, so the feed would be stuck off.
-"$S" realtime teardown --yes >/dev/null 2>&1
-"$S" realtime setup --yes >/dev/null 2>&1
+"$S" realtime teardown --yes >/tmp/rt-ha-teardown.log 2>&1
+"$S" realtime setup --yes >/tmp/rt-ha-setup.log 2>&1
 main_ready
+# `realtime setup` restarts the standby by removing its container and making it
+# again, so a failure there leaves no standby at all -- and says so only here.
+case "$(cat /tmp/rt-ha-setup.log /tmp/rt-ha-teardown.log 2>/dev/null)" in
+  *"kept its old settings"*) echo "  (the standby was not restarted: $(grep -h 'kept its old settings' /tmp/rt-ha-setup.log /tmp/rt-ha-teardown.log))";;
+esac
 assert_eq "the standby picks up a setup that happened after it" \
   "$(pg pg-standby 'SHOW wal_level')" "logical"
 
 "$S" realtime enable ok_t >/dev/null 2>&1
+
+# ---- A subscriber's position crosses the promotion. ------------------------
+#
+# Slot synchronisation needs four things true at once and fails by logging a
+# warning nobody reads, so each one is asserted rather than assumed. Three are
+# settings on the standby's command line, the slot among them -- deliberately
+# not written by pg_basebackup -R, because a backup that streams through the
+# slot fails outright when the slot is invalidated for falling behind. The
+# fourth is in the data directory: the database name in primary_conninfo, which
+# is why the base backup passes -d instead of -h and -U (those produce a
+# conninfo with no database name at all, and the sync worker connects to a
+# database).
+assert_eq "the standby synchronises slots" \
+  "$(pg pg-standby 'SHOW sync_replication_slots')" "on"
+assert_eq "…and feeds its position back to the primary" \
+  "$(pg pg-standby 'SHOW hot_standby_feedback')" "on"
+assert_eq "…through its own physical slot, which is not one of the feed's" \
+  "$(pg pg-main "SELECT count(*) FROM pg_replication_slots WHERE slot_name='fox_standby' AND slot_type='physical'")" "1"
+assert_eq "…named in the recovery settings it was built with" \
+  "$(pg pg-standby 'SHOW primary_slot_name')" "fox_standby"
+assert_contains "…and a database to reach the primary's slots through" \
+  "$(sudo docker exec pg-standby bash -c 'cat "$PGDATA/postgresql.auto.conf"' 2>/dev/null)" "dbname="
+
+# A subscriber that stays attached while the standby copies its slot, which is
+# the part of this that cannot be hurried.
+#
+# PostgreSQL refuses to copy a slot whose position is behind the standby's
+# catalog horizon -- "Synchronization could lead to data loss, because the
+# remote slot needs ... catalog xmin N, but the standby has ... catalog xmin
+# N+1" -- and the horizon of an otherwise idle database sits exactly one
+# transaction ahead of a slot nobody is consuming. So the copy completes only
+# while changes are being consumed, and it never completes for a slot that was
+# read once and abandoned. The first version of this waited six seconds with
+# nobody attached, got `synced=true` on a slot that was still *temporary*, and
+# promotion dropped it -- which is PostgreSQL being careful, not a fault.
+#
+# `synced` is therefore the wrong thing to wait for. The condition that means a
+# position will survive a promotion is a copy that is no longer temporary and
+# has a position of its own.
+( curl -skN --max-time 90 -H "Authorization: Bearer $KEY" \
+    "$API/api/branches/main/realtime" >/dev/null 2>&1 ) &
+SUB=$!
+assert_eq "the feed's slot is marked to survive a promotion" \
+  "$(for _ in $(seq 1 10); do
+       v="$(pg pg-main "SELECT failover FROM pg_replication_slots WHERE slot_name='fox_rt_main_stream'")"
+       [ -n "$v" ] && { echo "$v"; break; }; sleep 1
+     done)" "t"
+READY=no
+for i in $(seq 1 15); do
+  pg pg-main "INSERT INTO public.ok_t VALUES (99005$i,'a change to consume','x')" >/dev/null
+  sleep 4
+  [ "$(pg pg-standby "SELECT count(*) FROM pg_replication_slots
+        WHERE slot_name='fox_rt_main_stream' AND NOT temporary AND confirmed_flush_lsn IS NOT NULL")" = "1" ] \
+    && { READY=yes; break; }
+done
+assert_eq "…and the standby holds a usable copy of it, not a temporary one" "$READY" "yes"
+kill "$SUB" 2>/dev/null; wait 2>/dev/null
+sleep 2
+assert_eq "…at the position the subscriber left it" \
+  "$(pg pg-standby "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name='fox_rt_main_stream'")" \
+  "$(pg pg-main "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name='fox_rt_main_stream'")"
+
+# The change nobody is listening to, written before the promotion.
+#
+# Delivering it *after* the promotion is the whole of this: the slot carried its
+# position across, so the subscriber resumes from where it was. Without that the
+# decoder would find no slot on the promoted standby, make a fresh one starting
+# from "now", and this row would never be delivered to anyone -- the subscriber
+# would be told to resync and would have to re-read the table to find it.
+pg pg-main "INSERT INTO public.ok_t VALUES (990004, 'written before the failover', 'x')"
+sleep 3
+
 "$S" ha failover >/dev/null 2>&1; sleep 4
 assert_eq "the promoted standby is the primary" "$(pg pg-standby 'SELECT pg_is_in_recovery()')" "f"
 assert_eq "…and it is realtime-capable" "$(pg pg-standby 'SHOW wal_level')" "logical"
@@ -712,9 +827,12 @@ assert_contains "teardown is refused while failed over, and says what to run" \
   "$("$S" realtime teardown --yes 2>&1)" "ha failback"
 
 # The feed on `main` now means the feed on the promoted standby, which is the
-# situation RealtimeDSN resolves by address rather than by container name. A
-# slot made on the old primary did not come across -- slots are not replicated
-# -- so this also proves the decoder makes its own.
+# situation RealtimeDSN resolves by address rather than by container name.
+#
+# The slot did come across, which it would not have before failover-aware slots
+# -- so this capture proves two things at once: the change written before the
+# promotion arrives from the position the slot carried over, and the feed goes
+# on working for changes written after it.
 J=/tmp/rt-failover.ndjson
 : > "$J"
 ( curl -skN --max-time 25 -H "Authorization: Bearer $KEY" \
@@ -725,6 +843,11 @@ pg pg-standby "INSERT INTO public.ok_t VALUES (990002, 'after the failover', 'x'
 wait "$STREAM" 2>/dev/null
 assert_eq "the feed follows main onto the promoted standby" \
   "$(have_in "$J" "e.get('type')=='change' and (e.get('identity') or {}).get('id')=='990002'")" "yes"
+# The discriminating one. This row was written while nobody was attached, on a
+# primary that no longer exists; it can only arrive from a position that crossed
+# the promotion.
+assert_eq "…and a subscriber's position survives the promotion" \
+  "$(have_in "$J" "e.get('type')=='change' and (e.get('identity') or {}).get('id')=='990004'")" "yes"
 
 "$S" ha failback >/tmp/rt-failback.log 2>&1
 assert_eq "failback puts main back" "$(pg pg-main 'SELECT pg_is_in_recovery()')" "f"

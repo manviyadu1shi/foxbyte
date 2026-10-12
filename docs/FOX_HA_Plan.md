@@ -150,15 +150,21 @@ subscribers receive `resync`, which both published clients handle by dropping
 their position and refetching — but every subscriber re-reads everything after
 a failover, which for a large table is exactly the wrong moment for that load.
 
-PostgreSQL 17 added failover-aware slots, and **we ship PostgreSQL 18**
-([images.go:41](../internal/branch/images.go)). Creating slots with
-`failover = true` and enabling `sync_replication_slots` on the standby makes a
-subscriber's position survive promotion. We create slots without it today.
+PostgreSQL 17 added failover-aware slots, and **a fresh install ships
+PostgreSQL 18** ([images.go:41](../internal/branch/images.go)). Creating slots
+with `failover = true` and enabling `sync_replication_slots` on the standby
+makes a subscriber's position survive promotion. We create slots without it
+today.
 
 That turns "every subscriber refetches after a failover" into "subscribers
 carry on", for roughly a day of work. It is the cheapest high-value item on
 this whole list and it did not exist as an option when the document was
 written.
+
+*Corrected while building Phase 4:* "we ship 18" is true of a fresh install and
+not of every install — `pgImage` follows the data, so an install created under
+PostgreSQL 16 keeps running 16, and none of these settings exist there. See
+Phase 4 below.
 
 ### 3.4 The gateway is a single point of failure for *connections*
 
@@ -219,15 +225,144 @@ virtual IP the customer provides.
 
 Unlocks: recovery in about a minute with nobody awake.
 
-### Phase 4 — failover-aware realtime slots (small, ~1 day)
+### Phase 4 — failover-aware realtime slots — **done**
 
-Create slots with `failover = true`; enable `sync_replication_slots` on the
-standby. Assert in `integration_realtime.sh` that a subscriber's position
-survives `fox ha failover` — the suite already has a failover section and
-already asserts the promoted standby is realtime-capable.
+Subscribers carry on through a failover instead of refetching. The ratio was
+the best on the list and it held. The description of the work above was not
+accurate, though — it named one of four things that have to be true, and three
+of the obvious ways to build it would have broken an existing install: one that
+runs PostgreSQL 16, one that rebuilds its standby, and one that is simply
+busy.
 
-Unlocks: subscribers carry on through a failover instead of refetching.
-Best ratio on the list. Do it alongside Phase 1 rather than after Phase 3.
+**Four things, not one.** "Create slots with `failover = true`; enable
+`sync_replication_slots`" is what the feature is called, and on its own it does
+nothing at all. Slot synchronisation runs only when every one of these is true,
+and when one is missing it does not fail — the worker logs a line nobody reads
+and the slots are simply never copied:
+
+| | Where |
+|---|---|
+| the logical slot is marked `failover` | `ALTER_REPLICATION_SLOT` after the decoder creates it |
+| `sync_replication_slots=on`, `hot_standby_feedback=on` | main and the standby's command line (`postgresArgs`) |
+| the standby holds a physical slot on the primary (`primary_slot_name`) | `fox_standby`, on the standby's command line (`standbyRunArgs`) |
+| `primary_conninfo` names a database | `pg_basebackup -d "host=… user=… dbname=…"` |
+
+The last one is the trap. `pg_basebackup -R` copies the parameters it connected
+with, and `-h host -U user` produce a conninfo with no database name — checked,
+not assumed. The sync worker connects to a *database* on the primary to read
+its slots, so with `-h`/`-U` the whole feature is inert and looks installed.
+
+`synchronized_standby_slots` is deliberately **not** set. It makes logical WAL
+senders *wait for* the slots it names, so a named standby that is not there
+stops decoding altogether. A setting that turns a missing standby into a
+stalled feed does not belong in a default.
+
+**PostgreSQL 16 is still supported, and this would have broken it.** §3.3 above
+reasoned from "we ship PostgreSQL 18", which is true of a fresh install and not
+of every install: `pgImage` follows the data, not the binary, so an install
+created under 16 keeps running 16. `sync_replication_slots` does not exist
+there, and an unrecognised setting is fatal — `postgres -c
+sync_replication_slots=on` on 16 exits with `FATAL: unrecognized configuration
+parameter`, which inside docker is a database that never comes up. Every piece
+of this is gated on the major (`SlotSyncMajor`), including the catalog query
+behind `fox realtime slots`, which reads `failover` and `synced` through
+`to_jsonb` because naming them as columns is an error on 16.
+
+**And the backup must not go through that slot at all** — two independent
+reasons, one found by reading and one by the suite.
+
+The obvious way to make the physical slot is `pg_basebackup -C -S`, which
+refuses a slot that already exists and then deletes the data directory it was
+building. `fox ha enable` is the documented way to rebuild a standby, so the
+second one would have failed.
+
+Creating the slot separately and passing only `-S` fixes that and introduces
+something worse, which the integration suite caught and no amount of reading
+would have:
+
+```
+pg_basebackup: error: could not send replication command "START_REPLICATION":
+  ERROR: can no longer access replication slot "fox_standby"
+  DETAIL: This replication slot has been invalidated due to "wal_removed".
+```
+
+A slot created with `immediately_reserve` pins its position at creation, so it
+is subject to `max_slot_wal_keep_size` from creation — and on a busy primary
+with a small budget it can be invalidated in the seconds between being made and
+the backup's WAL streamer connecting to it. `ha enable` then cannot build a
+standby *at all*: a resilience feature taking out the thing it was meant to
+protect. The suite reached that state honestly, because section 10 leaves the
+budget at 32 MB after proving the budget invalidates slots.
+
+So the backup streams through no slot, exactly as it always did. The standby is
+told its slot on its own command line, where a setting also outranks the
+`postgresql.auto.conf` that `-R` writes, and the slot reserves nothing until the
+standby connects to it. Nothing is lost by waiting: the WAL the standby needs
+next is already in its own `pg_wal`, put there by the backup's `-X stream`.
+
+**A failback gets no slot.** `main` is rebuilt as a temporary standby of the
+promoted standby by `startContainer`, which names no slot, so one made there
+would reserve WAL that nothing reads. A failback is minutes long and ends with
+`main` a primary again; the standby that `ha enable` then builds gets the slot.
+
+**It is the same switch as the feed.** A physical slot holds WAL on the primary
+for a standby that may be gone, and with the change feed off there is no
+`max_slot_wal_keep_size` to bound it — so on an install that does not stream
+changes, adding one would trade "a dead standby needs rebuilding" for "a dead
+standby fills the primary's disk". So the slot exists only while the feed is on
+and the major can synchronise it, and a base backup on every other install is
+byte-for-byte the command it has always been. `fox ha disable` drops it.
+
+**Degrades rather than refuses.** A slot that is not failover-aware still
+streams every change correctly; all it loses is its position across a promotion
+that may never happen. So a failed `ALTER_REPLICATION_SLOT` logs and carries
+on, and `fox realtime slots` says of each slot whether it survives a failover —
+a degradation nobody can see is the thing worth avoiding, not the degradation.
+
+**The limit, which is PostgreSQL's and not ours.** A slot is copied to the
+standby only while it is being consumed. PostgreSQL will not copy one whose
+position is behind the standby's catalog horizon —
+
+```
+could not synchronize replication slot "fox_rt_main_stream"
+DETAIL: Synchronization could lead to data loss, because the remote slot needs
+WAL at LSN 0/72001F20 and catalog xmin 10115, but the standby has
+LSN 0/72001F20 and catalog xmin 10116.
+```
+
+— and the horizon of an otherwise idle database sits exactly one transaction
+ahead of a slot nobody is reading, so the position never catches up and the
+copy is retried forever. Measured: the standby stayed at `catalog xmin N+1` and
+the slot at `N` for fifty seconds without moving.
+
+So **a subscriber that reads continuously keeps its place through a failover;
+one that read once and went away is told to resync, exactly as it was before.**
+`sync_replication_slots` is not a thing you switch on and forget. It is also
+not something the product can fix — PostgreSQL is refusing in order not to lose
+data — so `fox realtime slots` says "marked to survive a failover" rather than
+"survives", and prints the reason once.
+
+This cost three runs of the suite to find, because `pg_replication_slots.synced`
+goes true long before the copy is usable: the copy is still `temporary` at that
+point, and promotion drops a temporary copy. The condition that actually means
+a position will survive is a copy that is **not temporary and has a position of
+its own**, and that is what the suite now waits for.
+
+`synchronized_standby_slots` was tried against this and does not help, which is
+a second reason not to set it.
+
+The assertion the plan asked for is in `integration_realtime.sh` section 12,
+and it is discriminating rather than structural: a subscriber reads until the
+standby's copy of its slot is usable, detaches, a row is written with nobody
+attached, the standby is promoted, and a subscriber then attaches and receives
+that row. It was written on a primary that no longer exists, so it can only
+arrive from a position that crossed the promotion. Before this, the decoder
+would have found no slot on the promoted standby, made a fresh one starting
+from "now", and that row would never have reached anyone.
+
+**Still a decision, not a task:** §3.1. Slots now survive a failover; the
+*licence* still does not, and after Phase 1 the promoted node is a different
+machine with a different fingerprint.
 
 ### Phase 5 — opt-in zero-data-loss mode (small)
 

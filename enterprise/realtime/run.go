@@ -127,7 +127,7 @@ func runOnce(ctx context.Context, branchName, slot, password string, hub *Hub, s
 		defer cancel()
 		_ = d.Close(closeCtx)
 	}()
-	if err := d.EnsureSlot(ctx); err != nil {
+	if err := d.EnsureSlot(ctx, branch.SlotSyncSupported()); err != nil {
 		return err
 	}
 	// Everything the subscriber already knew is stale after a reconnect, so the

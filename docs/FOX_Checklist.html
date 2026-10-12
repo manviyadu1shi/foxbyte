@@ -275,6 +275,7 @@
       <li class="ok">Streaming hot standby</li><li class="ok">Manual failover, <code>main</code> rerouted</li>
       <li class="ok">Nothing deletes or stops the promoted standby</li><li class="ok"><code>fox up</code> brings it back, not the old main</li>
       <li class="ok"><code>fox ha failback</code>, keeping every write</li><li class="ok">The promoted standby archives WAL, so backups and PITR cover the failover</li>
+      <li class="ok">With the change feed on, the standby&rsquo;s own physical slot and a conninfo with a database name, so realtime subscribers keep their position across a promotion (N1)</li>
       <li class="todo">Automatic failover, fencing, multi-host</li></ul></td><td class="tb">Unit; VM §6, §7</td></tr>
     <tr data-id="D5" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">D5</td><td><b>Portable export &amp; restore</b><ul class="subs">
       <li class="ok">Every non-agent branch: pg_dump, its roles, the Blackbox head; SHA256SUMS over all</li>
@@ -636,6 +637,8 @@
       <li class="ok">Slots named, listed, accounted for and swept only once Postgres has marked them lost; <code>fox check</code> warns on one nothing is draining</li>
       <li class="ok">The reaper leaves a subscribed branch alone (asked of Postgres, not of memory), and a resumed branch gets a fresh idle window</li>
       <li class="ok">A failover keeps the feed: the standby carries the same arguments, <code>setup</code> restarts one that predates it, and the feed follows <code>main</code> onto the promoted standby</li>
+      <li class="ok">A subscriber&rsquo;s <b>position</b> survives the failover too (HA plan phase 4): failover-aware slots synchronised to the standby through its own physical slot, so a change written before the promotion is delivered after it instead of costing a refetch &mdash; gated on the PostgreSQL major, since the settings are fatal on 16</li>
+      <li class="ok">&hellip;and the limit is stated rather than implied: PostgreSQL copies a slot to the standby only while it is being consumed, so a continuously-read subscriber keeps its place through a promotion and one that read once and left is told to resync, as it was before</li>
       <li class="ok">Neighbours unaffected: a continuous import runs under logical decoding and is itself decodable; backups, verify, failover and failback all pass</li>
       <li class="ok"><code>setup</code>, <code>teardown</code>, <code>status</code> and <code>slots</code> stay in the free build, so a downgrade can still undo it</li>
       <li class="lim">Console and REST only this release; the published SDKs get the feed once the wire format has survived real use</li>
