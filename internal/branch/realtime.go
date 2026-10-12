@@ -162,6 +162,14 @@ type RealtimeSlot struct {
 	// Postgres invalidated it rather than hold more — the budget doing its job.
 	// A lost slot can never be resumed from.
 	Status string `json:"status"`
+	// Failover is whether this slot is marked to survive a promotion, so its
+	// subscriber carries on after `fox ha failover` instead of refetching.
+	// Always false below SlotSyncMajor, where the column does not exist.
+	Failover bool `json:"failover"`
+	// Synced is Postgres's own: true only on a standby, for a slot copied there
+	// by slot synchronisation. On a primary — which is where the feed reads —
+	// it is always false, and that is not a problem to report.
+	Synced bool `json:"synced"`
 }
 
 // Lost reports whether this slot is past saving, so a subscriber must refetch
@@ -172,17 +180,24 @@ func (s RealtimeSlot) Lost() bool { return s.Status == "lost" }
 // holding. `fox realtime slots` prints it and `fox check` warns on it: a slot
 // nobody is draining is the one failure of this design that costs disk.
 func RealtimeSlots(name string) ([]RealtimeSlot, error) {
+	// failover and synced are read through to_jsonb rather than named as
+	// columns: they arrived in PostgreSQL 17 and this query also has to run on
+	// 16, where naming them is an error that would take out `fox realtime
+	// slots` and `fox check` on every 16 install. A missing key reads as NULL,
+	// which coalesces to false — the truth there.
 	lines, err := LedgerQuery(ServingBranch(name), `SELECT slot_name || '|' || active::text || '|' ||
 	    coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0)::text
 	    || '|' || coalesce(wal_status, '')
-	  FROM pg_replication_slots WHERE slot_name LIKE '`+SlotPrefix+`%' ORDER BY slot_name`)
+	    || '|' || coalesce((to_jsonb(s)->>'failover')::bool, false)::text
+	    || '|' || coalesce((to_jsonb(s)->>'synced')::bool, false)::text
+	  FROM pg_replication_slots s WHERE slot_name LIKE '`+SlotPrefix+`%' ORDER BY slot_name`)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]RealtimeSlot, 0, len(lines))
 	for _, l := range lines {
 		parts := strings.Split(l, "|")
-		if len(parts) < 4 {
+		if len(parts) < 6 {
 			continue
 		}
 		n, _ := strconv.ParseInt(parts[2], 10, 64)
@@ -192,6 +207,8 @@ func RealtimeSlots(name string) ([]RealtimeSlot, error) {
 			Active:   strings.HasPrefix(strings.ToLower(parts[1]), "t"),
 			WALBytes: n,
 			Status:   parts[3],
+			Failover: strings.HasPrefix(strings.ToLower(parts[4]), "t"),
+			Synced:   strings.HasPrefix(strings.ToLower(parts[5]), "t"),
 		})
 	}
 	return out, nil

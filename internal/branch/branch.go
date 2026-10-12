@@ -260,7 +260,7 @@ func startContainer(name string, primary bool) error {
 		args = append(args, "-e", "WALG_COMPRESSION_METHOD=lz4")
 	}
 	args = append(args, img)
-	args = append(args, postgresArgs(primary)...)
+	args = append(args, postgresArgs(primary, imageMajor(img))...)
 	// `docker run -d` answers with the container id, which was the last thing
 	// `fox branch create` printed — a 64-character hash where a person wanted the
 	// branch's name and how to reach it. The id is kept for a failure, where it is
@@ -279,7 +279,12 @@ func startContainer(name string, primary bool) error {
 // the order it always got them, and a branch gets no command line at all — the
 // image's own default. Anything else would restart every database on upgrade
 // for a feature nobody asked for.
-func postgresArgs(primary bool) []string {
+//
+// major is the PostgreSQL major of the image about to run, because two of these
+// settings do not exist on every supported major and an unrecognised setting is
+// fatal. Passed in rather than read here so this stays a pure function of what
+// is being started, testable without a pool.
+func postgresArgs(primary bool, major string) []string {
 	if !RealtimeOn() {
 		if !primary {
 			return nil
@@ -296,13 +301,41 @@ func postgresArgs(primary bool) []string {
 		// it, or docker takes the first flag for the command — and
 		// listen_addresses is stated rather than inherited, because a branch is
 		// reached over the docker network and should say so.
+		//
+		// No slot synchronisation: a branch is a clone, never a standby, so it
+		// has no standby of its own to carry its slots. The settings would be
+		// inert rather than harmful, which is a worse thing to leave for the
+		// next reader than nothing.
 		return []string{"postgres",
 			"-c", "wal_level=logical",
 			"-c", keep,
 			"-c", "listen_addresses=*",
 		}
 	}
-	return append(primaryArgs("logical"), "-c", keep)
+	// Slot synchronisation, so a subscriber survives a failover.
+	//
+	// A logical slot lives on the primary. Promote a standby and the slot is
+	// gone with the old primary, so every subscriber is told to resync and
+	// re-reads everything — at the worst possible moment, because a failover is
+	// already a bad day. PostgreSQL 17 added slots that follow a promotion.
+	//
+	// These are the arguments both main and the HA standby run with
+	// (standbyRunArgs), and both get them on purpose. They do nothing on a
+	// primary, and which container *is* the primary changes: `ha failover`
+	// promotes the standby, `ha failback` makes main a standby again. Giving
+	// them only to the standby would mean a failed-back main quietly stopped
+	// synchronising slots, which is exactly the kind of thing nobody notices
+	// until the second failover.
+	//
+	// synchronized_standby_slots is deliberately NOT set. It makes logical WAL
+	// senders *wait for* the slots it names, so naming one that does not exist
+	// stops decoding altogether — a setting that turns a missing standby into a
+	// stalled feed does not belong in a default.
+	args := append(primaryArgs("logical"), "-c", keep)
+	if slotSyncSupported(major) {
+		args = append(args, "-c", "hot_standby_feedback=on", "-c", "sync_replication_slots=on")
+	}
+	return args
 }
 
 // primaryArgs is the primary's five settings, with wal_level named once.

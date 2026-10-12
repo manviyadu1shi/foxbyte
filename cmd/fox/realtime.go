@@ -185,7 +185,9 @@ func realtimeSlots(args []string) error {
 		fmt.Printf("No change-feed slots on %q.\n", name)
 		return nil
 	}
+	marked := false
 	for _, s := range slots {
+		marked = marked || s.Failover
 		state := "idle"
 		switch {
 		case s.Active:
@@ -193,12 +195,39 @@ func realtimeSlots(args []string) error {
 		case s.Lost():
 			state = "lost"
 		}
-		fmt.Printf("%-40s %-10s %s of WAL held\n", s.Name, state, humanBytes(s.WALBytes))
+		// Whether this slot survives a promotion is the difference between a
+		// subscriber carrying on after `ha failover` and re-reading the table,
+		// so it is on the line rather than in a footnote.
+		//
+		// "marked", not "survives": this is read from the primary, and the mark
+		// is only half of it. The standby has to have finished copying the slot,
+		// which PostgreSQL only does while the slot is being consumed — see the
+		// note printed below.
+		carries := "refetches after a failover"
+		if s.Failover {
+			carries = "marked to survive a failover"
+		}
+		fmt.Printf("%-40s %-10s %-10s %s\n", s.Name, state, humanBytes(s.WALBytes)+" WAL", carries)
 	}
 	fmt.Printf("\nAn idle slot is what a subscriber resumes from, and holds at most %s of WAL.\n"+
 		"A `lost` one fell further behind than that and cannot be resumed from; those are\n"+
 		"dropped on `%s up`. Drop one by hand with:\n  %s realtime slots %s --drop <name>\n",
 		branch.WALKeepSize(), brand.CLI, brand.CLI, name)
+	if !branch.SlotSyncSupported() {
+		fmt.Printf("\nThese slots do not survive a promotion: PostgreSQL %d added that and this\n"+
+			"install runs an older major, so after `%s ha failover` every subscriber is told\n"+
+			"to resync and re-reads its table. Nothing else about the feed is affected.\n",
+			branch.SlotSyncMajor, brand.CLI)
+	} else if marked {
+		// Worth saying once, because it is the one thing about this that is
+		// counter-intuitive and it is PostgreSQL's rule, not ours: a slot is
+		// copied to the standby only while it is being read.
+		fmt.Print("\n`Marked` is the primary's half. A standby only copies a slot while it is\n" +
+			"being consumed — PostgreSQL will not copy one whose position is behind the\n" +
+			"standby's catalog horizon, and the position of a slot nobody is reading never\n" +
+			"moves. So a subscriber that reads continuously keeps its place through a\n" +
+			"failover; one that read once and went away is told to resync, as it was before.\n")
+	}
 	if drop := optValue(args, "--drop"); drop != "" {
 		if err := branch.DropRealtimeSlot(name, drop); err != nil {
 			return err
