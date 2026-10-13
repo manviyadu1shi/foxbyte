@@ -591,7 +591,7 @@ serve reads across machines: a copy in recovery cannot have its passwords
 rewritten, so that case needs a role created on the primary instead — which is
 the follow-up phase 7 named.
 
-### Phase 3 — automatic failover with fencing (large) — **fencing done; the manager is a decision**
+### Phase 3 — automatic failover with fencing (large) — **done; the virtual IP is still a decision**
 
 Wrap `pg_auto_failover` or Patroni; do not write one. The document's reasoning
 is right and the recommendation stands. For an on-prem appliance I lean
@@ -603,6 +603,45 @@ The gateway stops asking "which container on this host is primary"
 virtual IP the customer provides.
 
 Unlocks: recovery in about a minute with nobody awake.
+
+*Done, and not by wrapping either of them.* `fox ha watch` runs on the standby
+and promotes only when it and a **witness** on a third host both fail to reach
+the primary. The refusal to run without a witness is the feature: this section
+already said that no amount of local probing can tell a dead primary from an
+unreachable one, and an automatic failover configured without a third opinion is
+a scheduled split brain.
+
+Why not `pg_auto_failover` or Patroni, having leaned towards the first. Both
+want to own the cluster — they create the data directory, write the recovery
+configuration and perform the promotion — and this engine owns all three, since
+every branch is a ZFS clone of a data directory it made and `node join` writes
+`primary_conninfo` itself. Marrying either would mean handing over the parts
+branching is built on. The measurement in §6.3 is the second reason:
+`postgresql-18-auto-failover` installs from pgdg, but its last tagged release is
+April 2025 and the PG 17/18/19 work is untagged. What those projects are
+actually for is the quorum, and that is the part reproduced here — a witness,
+and a refusal without one.
+
+The promotion is the ordinary fenced `HAFailover`. Nothing in the watcher
+reimplements promotion, nothing skips the fence, and `--force` is not reachable
+from it at all: the one thing an unattended process must never do is decide that
+a primary it cannot see has definitely gone. Four decisions, one of which
+promotes, and the two refusals are separate — "the witness reaches it" means
+*this* machine is the cut-off one, while "the witness could not be asked" is no
+opinion at all. Both go in the hash-chained security log, because a refusal is a
+split brain that did not happen and that is worth being able to prove.
+
+**Still a decision, and the only thing left of this phase:** the gateway half.
+Two gateways behind a virtual IP is what makes a failover invisible to clients,
+and §6.4 — whether the customer supplies the IP — decides what we build. With
+one gateway per site the surviving machine serves on its own address, which is
+correct and is not transparent.
+
+**What no drill and no witness can fix:** the witness has to be where the
+clients are. A witness partitioned from the primary alongside the standby will
+agree with it about a primary that is still serving somebody else. That is a
+placement an operator chooses, which is why `ha watch` prints it rather than
+assuming it.
 
 #### Fencing came first, because phase 1 shipped a split brain
 
@@ -907,7 +946,7 @@ additionally wait for replay — read-your-writes on the standby, at more latenc
 Unlocks: RPO of zero inside the data centre. Phase 1 is what makes the quorum
 form mean what the plan originally claimed.
 
-### Phase 6 — DR site and drills — **the drill is done; the site is now possible**
+### Phase 6 — DR site and drills — **done: the drill can be run at the second site**
 
 The plan said it itself: "the drill is the deliverable, not the standby". The
 drill is built. The second site is not, and cannot be — an asynchronous standby
@@ -920,6 +959,42 @@ order its own dependencies allow:
 | A scripted drill that measures and reports real RPO and RTO | **done** |
 | The WAL archive at a second site with retention | **already possible** — a remote S3 target with Object Lock, which `fox backup target set` has supported since before this plan, and `fox check` has warned about since phase 0. Configuration, not code |
 | An asynchronous standby at the second site | **unblocked**: phase 1 landed `node expose` and `node join`, so a standby at another site is a `node join` from there |
+| A drill that can be run *at* that site | **done** — `fox ha drill --takeover`, below |
+
+*Done since.* Two things were wrong with the report rather than with the drill.
+
+It disclaimed three things in every copy of it — losing a machine, noticing, and
+a second site — and after phases 1, 3 and 7 all three can be false. A document
+that goes on saying "there is only one site" when there were two is as
+misleading as one claiming a site it did not have, and only the second kind of
+mistake gets checked for. A result now carries the topology it ran in and who
+noticed, and the limits section prints what is true of *that* drill: with two
+machines and a watcher it says "nothing it set out to" and names the one thing
+no drill can test, which is whether the witness is where the clients are.
+Detection is read from the security log rather than passed as a flag, because
+the watcher is a different process and the log is what an incident review would
+use to answer the same question.
+
+And the drill could only be run from the machine that dies, which at a second
+site is the wrong machine. `fox ha drill --takeover` runs on the survivor. It
+stops nothing and promotes nothing — both are what it is watching for — and a
+*local* drill is now refused on a machine that follows a primary elsewhere,
+naming this one, because there is no local primary there to end.
+
+That changes what it measures, in both directions. **RTO now includes
+noticing**, which a drill that kills the primary itself structurally cannot, so
+it is the number a client experienced rather than the number the promotion took.
+**RPO is reported as not measurable from that side** rather than as a zero: the
+writer was on the machine that went away, so what it acknowledged in its last
+moments is known only to it and, for whatever it shipped, to the archive. The
+last WAL position the copy received is reported instead, as the one true thing a
+survivor can say about what it might be missing. Measured in the test VM: 6.8s
+from unreachable to serving, credited to `ha watch`, with the loss figure
+refused.
+
+**What is still the operator's to do:** run it between two real machines at two
+real sites. Everything the run needs is built, and a WAN is not something a
+single-host suite can stand in for.
 
 #### `fox ha drill --yes`
 
@@ -1089,7 +1164,12 @@ pitch is a tamper-evident record. Route B is a different product.
    the WAL already being replicated. The three options this section listed were
    all a second thing to run; none of them kept the property that makes auth
    survive `main` being down. See phase 2.
-3. **Failover manager** — `pg_auto_failover` or Patroni. *Narrowed by
+3. **Failover manager** — **decided: neither.** Both want to own the data
+   directory, the recovery configuration and the promotion, all of which this
+   engine owns; and the measurement below is the second reason. What they are
+   for is the quorum, and phase 3 reproduces that with a witness and a refusal
+   without one. The original note, kept because the measurement stands:
+   *Narrowed by
    measurement:* `pg_auto_failover` is installable for PostgreSQL 18 in this
    engine's image (`postgresql-18-auto-failover 2.2-4.pgdg12+1`), but its last
    tagged release is April 2025 and the PG 17/18/19 work is untagged on `main`.
@@ -1097,3 +1177,9 @@ pitch is a tamper-evident record. Route B is a different product.
    `synchronous_standby_names`, which phase 5 made ours — so this is a rewrite
    of how the engine runs Postgres, not a wrapper around it.
 4. **Whether the customer supplies the virtual IP**, or we ship something.
+   *Now the only thing standing between phase 3 and a failover clients do not
+   notice.* Everything else in that phase is built: `ha watch` promotes
+   unattended behind a witness, and the surviving machine serves on its own
+   address. Two gateways behind an IP that moves is what makes the address stop
+   changing, and whose IP it is decides whether we ship keepalived-style
+   machinery or document a requirement.
