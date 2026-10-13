@@ -212,11 +212,70 @@ func execSudo(name string, args ...string) *exec.Cmd {
 }
 
 // capture runs a privileged command and returns its trimmed stdout.
+//
+// Parsing stays on stdout, because callers split it on separators and a NOTICE
+// or a docker warning must not reach them — but a failure keeps stderr, since
+// "exit status 1" on its own says nothing anybody can act on. `fox check`'s
+// Blackbox line could only report "cannot verify the record: verify query: exit
+// status 1" while psql had written the reason to the other stream, and that is
+// the one line a person reads when they are asking whether their audit record
+// is intact. cmd.Output() already collects stderr into ExitError.Stderr; it was
+// simply dropped.
+//
+// Safe to surface because the engine keeps credentials out of argv and in env
+// files — the invariant TestNoPasswordOnCommandLines holds — so a command's own
+// text, which is what it echoes on failure, carries no secret. Checked rather
+// than assumed: no capture call passes a password, a conninfo or a secret.
 func capture(name string, args ...string) (string, error) {
 	cmd, ctx, cancel := sudoCmd(execQuick, name, args...)
 	defer cancel()
 	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), execErr(ctx, execQuick, name, err)
+	return strings.TrimSpace(string(out)), execErr(ctx, execQuick, name, withStderr(err))
+}
+
+// stderrShown bounds what reaches an error message. The callers that print one
+// mostly print its first line, and an unbounded paste of psql's LINE/caret
+// detail would push the part that matters off the end of a terminal.
+const stderrShown = 300
+
+// withStderr adds what a failing command wrote to stderr to its error.
+//
+// One line: the first that says anything. psql puts the sentence worth reading
+// first ("connection refused", `relation "x" does not exist`) and the detail
+// after it, and keeping it to one line is what lets every caller carry on
+// treating an error as a phrase it can wrap.
+//
+// A deadline is not touched here — execErr says something better about it than
+// a killed command's half-written stderr would.
+func withStderr(err error) error {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return err
+	}
+	if line := stderrLine(ee.Stderr); line != "" {
+		return fmt.Errorf("%w: %s", err, line)
+	}
+	return err
+}
+
+// stderrLine is the first line of stderr worth repeating, bounded. Pure, and
+// tested, because the cases that matter — nothing written, a leading blank
+// line, a sudo banner, something far too long — all arrive from outside the
+// process and none of them should produce a useless or unreadable error.
+func stderrLine(b []byte) string {
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		// By rune, not by byte: a message is text, and cutting one in half
+		// mid-character would print a replacement glyph instead of a letter.
+		if r := []rune(l); len(r) > stderrShown {
+			return string(r[:stderrShown]) + "…"
+		}
+		return l
+	}
+	return ""
 }
 
 func datasetExists(ds string) bool {

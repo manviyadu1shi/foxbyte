@@ -18,8 +18,15 @@ const (
 
 // skipDirs are not source: generated output, vendored packages, and the
 // repository's own metadata.
+//
+// .claude holds the tooling's own state, and under it a git worktree per task
+// spun off into its own session — a second checkout of this same tree, inside
+// it. Every file under its enterprise/ then reads as a free file carrying the
+// paid header, because its path starts with .claude. The sibling walker in
+// cmd/fox/oldnames_test.go skips it for the same reason.
 var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "dist": true, "bin": true, "coverage": true,
+	".claude": true,
 }
 
 // sourceFiles walks the repository from its root, calling fn with each source
