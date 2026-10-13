@@ -412,6 +412,71 @@ assert_eq "…while its ordinary connections still work" \
 rm -f /tmp/su.env
 assert_eq "\`check\` says only that role may copy it" \
   "$($S check 2>&1 | grep -c '^ok    replication .*db_replica')" "1"
+# ---- publishing the primary for a standby elsewhere (phase 1) --------------
+#
+# The engine otherwise keeps Postgres off every network: startContainer
+# publishes no host port, because a direct connection would bypass the gateway,
+# its API key, TLS and ledger attribution. `node expose` is the one command
+# that reverses that, and these assert how narrowly.
+#
+# The cross-machine half of this was measured between two VMs on a shared
+# network; what a single-VM suite can hold is the shape of what gets published.
+assert_eq "nothing is published on a fresh install" \
+  "$($S node status 2>&1 | grep -c 'not published')" "1"
+assert_contains "expose without --yes refuses and says what it would do" \
+  "$($S node expose --address 10.9.9.9 --peer 10.9.9.10 2>&1)" "over TLS only"
+assert_contains "…refusing a loopback address another machine cannot reach" \
+  "$($S node expose --address 127.0.0.1 --peer 10.9.9.10 --yes 2>&1)" "loopback"
+assert_contains "…and an address that is every interface" \
+  "$($S node expose --address 0.0.0.0 --peer 10.9.9.10 --yes 2>&1)" "every interface"
+assert_contains "…and a peer that is a name rather than an address" \
+  "$($S node expose --address 10.9.9.9 --peer db1.internal --yes 2>&1)" "not an IP address"
+# The real thing, on this VM's own address: a published port, TLS, and two
+# rules -- samenet for a standby here, hostssl for the one that is not.
+VMIP="$(ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1)"
+$S node expose --address "$VMIP" --peer 10.9.9.10 --yes >/tmp/expose.log 2>&1
+assert_eq "expose exits 0" "$?" "0"
+assert_eq "…publishing the port on that address only, not every interface" \
+  "$(sudo docker port pg-main 2>/dev/null | grep -c "$VMIP:5432")" "1"
+assert_eq "…with TLS actually serving" "$(pg pg-main 'SHOW ssl')" "on"
+assert_eq "…admitting the other machine only over TLS" \
+  "$(sudo docker exec -u postgres pg-main bash -c 'grep -cF "hostssl replication db_replica 10.9.9.10/32 scram-sha-256" "$PGDATA/pg_hba.conf"')" "1"
+# The private key must not be in the data directory: pg_basebackup copies
+# PGDATA, so a key kept there is handed to every standby that joins.
+assert_eq "…and the private key is not where a base backup would copy it" \
+  "$(sudo ls /dbpool/branches/main/pgdata/ 2>/dev/null | grep -c 'fox-replication' || true)" "0"
+assert_contains "…and the join token carries a CA and one role's password" \
+  "$($S node token 2>/dev/null | head -c 400 | base64 -d 2>/dev/null || $S node token 2>/dev/null | tr -d '\n' | python3 -c 'import base64,sys; print(base64.urlsafe_b64decode(sys.stdin.read()+"==").decode())')" \
+  "db_replica"
+assert_eq "…and not the install secret" \
+  "$($S node token 2>/dev/null | tr -d '\n' | python3 -c 'import base64,sys,re
+raw = base64.urlsafe_b64decode(sys.stdin.read()+"==").decode()
+import os
+secret = open(os.path.expanduser("~/.fox/pg.env")).read().split("PGPASSWORD=")[1].split("\n")[0]
+print("leaked" if secret in raw else "clean")')" "clean"
+assert_contains "\`check\` says the primary is published" "$($S check 2>&1 | grep replication)" "published at"
+# Taking it back off the network removes the port and the peer rule, and keeps
+# the rule a standby on this machine uses.
+$S node unexpose >/dev/null 2>&1
+assert_eq "unexpose exits 0" "$?" "0"
+assert_eq "…so no host port is published" "$(sudo docker port pg-main 2>/dev/null | wc -l | tr -d ' ')" "0"
+assert_eq "…the peer rule is gone" \
+  "$(sudo docker exec -u postgres pg-main bash -c 'grep -c "^hostssl" "$PGDATA/pg_hba.conf" || true')" "0"
+assert_eq "…and the local standby's rule is kept" \
+  "$(sudo docker exec -u postgres pg-main bash -c 'grep -cF "host replication db_replica samenet" "$PGDATA/pg_hba.conf"')" "1"
+# Publishing and unpublishing each restart main, which interrupts replication.
+# The standby has to come back on its own -- and everything below here, the
+# zero-data-loss block included, depends on it having done so. Waited for
+# rather than raced: `ha sync on` rightly refuses while nothing is streaming,
+# and the first version of this block failed five assertions in section 6 for
+# exactly that reason.
+STREAMING=no
+for _ in $(seq 1 30); do
+  [ "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" = "1" ] \
+    && { STREAMING=yes; break; }
+  sleep 2
+done
+assert_eq "the standby streams again after the primary was restarted twice" "$STREAMING" "yes"
 # ---- end phase 1 -----------------------------------------------------------
 
 # ---- zero-data-loss mode (HA plan phase 5) --------------------------------

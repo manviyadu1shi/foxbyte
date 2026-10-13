@@ -106,8 +106,12 @@ func allowReplication(primary string) error {
 	if err := EnsureReplicationRole(primary); err != nil {
 		return err
 	}
+	peer := ""
+	if e, ok := CurrentExposure(); ok {
+		peer = e.Peer
+	}
 	if out, err := captureCombined("docker", "exec", "-u", "postgres", primary,
-		"bash", "-c", hbaScript()); err != nil {
+		"bash", "-c", hbaScript(peer)); err != nil {
 		return fmt.Errorf("narrowing the replication rule on %s: %w\n%s", primary, err, strings.TrimSpace(out))
 	}
 	if out, err := captureCombined("docker", "exec", "--env-file", pgEnvFile(), primary,

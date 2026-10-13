@@ -82,13 +82,41 @@ const replicationHBALine = "host replication " + ReplicationRole + " samenet scr
 // admits everyone it names.
 const legacyHBAPattern = `^host[[:space:]]\+replication[[:space:]]\+all[[:space:]]\+all`
 
+// peerHBALine admits the standby on another machine: TLS required, this role
+// only, that address only.
+//
+// `hostssl` rather than `host` is the whole of "TLS on replication traffic".
+// `host` would match a plaintext connection too, so a standby that silently
+// failed to negotiate TLS would still be admitted and would still send its
+// password. Measured: with this rule, sslmode=disable is refused outright.
+func peerHBALine(peer string) string {
+	if strings.TrimSpace(peer) == "" {
+		return ""
+	}
+	return "hostssl replication " + ReplicationRole + " " + peer + " scram-sha-256"
+}
+
 // hbaScript is the shell that narrows a primary's replication rule. Separate
 // and pure so a test can read what will run against a database it has no way to
 // start.
-func hbaScript() string {
-	return `set -e
+//
+// peer is "" on an install that publishes nothing, which is every install until
+// somebody runs `node expose` — and then the file says exactly what it said
+// before this existed.
+func hbaScript(peer string) string {
+	sh := `set -e
 sed -i '/` + legacyHBAPattern + `/d' "$PGDATA/pg_hba.conf"
 grep -qF '` + replicationHBALine + `' "$PGDATA/pg_hba.conf" || echo '` + replicationHBALine + `' >> "$PGDATA/pg_hba.conf"`
+	// Stale peer rules go first: an address that is no longer the standby's
+	// must stop being admitted, and `node expose` run twice with a different
+	// peer would otherwise leave both.
+	sh += `
+sed -i '/^hostssl[[:space:]]\+replication[[:space:]]\+` + ReplicationRole + `/d' "$PGDATA/pg_hba.conf"`
+	if line := peerHBALine(peer); line != "" {
+		sh += `
+echo '` + line + `' >> "$PGDATA/pg_hba.conf"`
+	}
+	return sh
 }
 
 // ReplicationOpenToEveryone reports whether a server still carries the wide
