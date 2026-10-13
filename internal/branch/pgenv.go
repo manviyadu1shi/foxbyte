@@ -40,6 +40,20 @@ func replicaEnvFile() string {
 	return replicaEnvPath
 }
 
+// joinedReplicaEnvFile is the replication password a join token carried, for
+// the base backup that copies a primary on another machine (nodejoin.go).
+//
+// Takes the password rather than deriving it, because that is the whole point:
+// this install's own secret derives a different one and the primary has never
+// heard of it. Here rather than beside the join for the same reason
+// replicaEnvFile is here — this file is one of the two
+// TestNoPasswordOnCommandLines exempts, and one place that knows how to write a
+// credential file beats a third exemption. That test caught this twice now,
+// and was right twice.
+func joinedReplicaEnvFile(password string) string {
+	return writeEnvFile("joined-replica.env", fmt.Sprintf("PGPASSWORD=%s\n", password))
+}
+
 // writeEnvFile puts one credential file in the state directory, 0600, and
 // returns its path. Written beside and renamed over, so a process reading it
 // never sees half a file. On failure it still returns the path, because docker

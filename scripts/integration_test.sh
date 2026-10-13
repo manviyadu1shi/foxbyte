@@ -477,6 +477,43 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 assert_eq "the standby streams again after the primary was restarted twice" "$STREAMING" "yes"
+
+# ---- node join: the refusals a single VM can hold --------------------------
+#
+# The working path needs two machines and was verified between two VMs on a
+# shared network: a standby copied over TLS, a row written on the primary
+# arriving on the other machine, the primary killed with SIGKILL, the survivor
+# promoted and taking writes with every acknowledged row intact. What a
+# single-VM suite can assert is that the command refuses what it should and
+# that a local standby is unaffected by any of it.
+assert_eq "this install follows no other primary" "$($S node status 2>&1 | grep -c 'standby of')" "0"
+assert_contains "a join token that is not one is refused with a sentence" \
+  "$($S node join '!!! not a token !!!' 2>&1)" "does not look like a join token"
+assert_contains "…and one that decodes to nothing useful" \
+  "$($S node join bm90LWEtdG9rZW4 2>&1)" "could not be read"
+assert_contains "…as is one that carries nothing usable" \
+  "$($S node join "$(printf '{"v":1}' | base64 | tr -d '=' | tr '/+' '_-')" 2>&1)" "carries no"
+assert_contains "…and one minted by a later release" \
+  "$($S node join "$(printf '{"v":9,"address":"a","port":1,"role":"r","password":"p","ca":"c","database":"d"}' | base64 | tr -d '=\n' | tr '/+' '_-')" 2>&1)" "different releases"
+# A machine that already has a standby of its own main cannot also be a standby
+# of somebody else's: it is the same container and the same storage.
+# A syntactically valid token that points nowhere: the standby collision is
+# checked before anything is dialled, so this never leaves the machine. Minted
+# here rather than with `node token`, which has nothing to print by this point
+# — the block above ended with `node unexpose`, and the first version of this
+# assertion got "unexpected end of JSON input" for exactly that reason.
+FAKETOK="$(python3 -c '
+import base64, json
+print(base64.urlsafe_b64encode(json.dumps({
+  "v": 1, "address": "10.9.9.9", "port": 5432, "role": "db_replica",
+  "password": "x", "ca": "-----BEGIN CERTIFICATE-----\nx\n", "database": "appdb",
+}).encode()).decode().rstrip("="))')"
+assert_contains "joining is refused while this install has its own standby" \
+  "$($S node join "$FAKETOK" 2>&1)" "already has a standby of its own main"
+assert_eq "…and that standby is untouched by the refusal" \
+  "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
+assert_contains "leaving is a no-op on an install that follows nobody" \
+  "$($S node leave 2>&1)" "follows no other primary"
 # ---- end phase 1 -----------------------------------------------------------
 
 # ---- zero-data-loss mode (HA plan phase 5) --------------------------------
