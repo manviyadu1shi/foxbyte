@@ -433,6 +433,85 @@ assert_eq "\`ha status\` says how far behind the copy is" \
   "$($S ha status 2>/dev/null | grep -c 'behind the primary')" "1"
 # ---- end phase 7 -----------------------------------------------------------
 
+# ---- accounts and keys reach the other machine (HA plan phase 2) -----------
+#
+# A failover that leaves nobody able to sign in is not a failover. The primary
+# writes its accounts, keys and the records authored around them into a
+# database of its own inside the replicated cluster; a machine that follows a
+# primary elsewhere reads them from its own copy and applies them into its own
+# SQLite. Nothing about signing in touches Postgres, which is why the store did
+# not move into main: that would make logins impossible during the one window
+# this exists for.
+#
+# The control plane carries them on a timer, so these wait for it rather than
+# calling anything. What is being tested is the part that runs by itself.
+statedg() { sudo docker exec "$1" psql -U dbadmin -d statedb -tAc "SELECT digest FROM shared WHERE id=1" 2>/dev/null | tr -d ' \n'; }
+SD=""
+for _ in $(seq 1 16); do SD="$(statedg pg-main)"; [ -n "$SD" ] && break; sleep 5; done
+assert_eq "the primary carries its accounts into the replicated database" \
+  "$([ -n "$SD" ] && echo shipped || echo nothing)" "shipped"
+# Replicated, not shipped twice: the document travels in the WAL the standby is
+# already streaming, which is the whole reason this needs no second channel.
+assert_eq "…and the standby has the same document, through replication" "$(statedg pg-standby)" "$SD"
+assert_eq "…carrying the seven tables a second machine needs" \
+  "$(sudo docker exec pg-main psql -U dbadmin -d statedb -tAc "SELECT string_agg(k, ',' ORDER BY k) FROM shared, jsonb_object_keys(payload->'tables') k WHERE id=1" 2>/dev/null)" \
+  "api_keys,branch_owners,change_requests,oauth_identities,pipelines,pipeline_targets,users"
+# Sessions are deliberately absent: a browser session is minutes old and cheap
+# to replace, and carrying bearer tokens between machines would widen what a
+# stolen document is worth for the convenience of not signing in again.
+assert_eq "…and not the session tokens" \
+  "$(sudo docker exec pg-main psql -U dbadmin -d statedb -tAc "SELECT payload::text LIKE '%sessions%' FROM shared WHERE id=1" 2>/dev/null)" "f"
+# The one privilege that makes this database different from appdb. Asked of
+# Postgres over the container's socket, which trusts the connection, so what is
+# being tested is the CONNECT privilege and not a password.
+assert_contains "the roles clients log in as cannot read it" \
+  "$(sudo docker exec pg-main psql -U "$DB_CLIENT_ROLE" -d statedb -tAc 'select 1' 2>&1 | head -1)" \
+  "permission denied for database"
+# An account made now reaches the other machine, which is the claim.
+printf 'password123\n' | $S user create shipped@foxbyte.dev >/dev/null 2>&1
+SD2=""
+for _ in $(seq 1 10); do SD2="$(statedg pg-main)"; [ -n "$SD2" ] && [ "$SD2" != "$SD" ] && break; sleep 5; done
+assert_eq "a new account changes the document the other machine reads" \
+  "$([ -n "$SD2" ] && [ "$SD2" != "$SD" ] && echo changed || echo unchanged)" "changed"
+
+# The other side of it, as far as one machine can show: a node that follows a
+# primary elsewhere treats its accounts as a copy. The join state is what says
+# so, and writing it is how a single machine can be asked the question at all --
+# applying a real document from a real second machine is what the unit tests in
+# internal/auth cover, with two stores.
+printf '{"address":"10.9.9.9","port":5432,"role":"db_replica","at":"2026-10-13T00:00:00Z"}\n' > "$HOME/$BRAND_STATE_DIR/node-joined.json"
+assert_contains "a follower refuses to create an account, since the next copy would remove it" \
+  "$(printf 'password123\n' | $S user create ghost@foxbyte.dev 2>&1 | head -1)" "accounts are a copy"
+# The firmest of the refusals: a key revoked on a copy comes back with the next
+# one, so the person told it was revoked would be wrong about the one thing
+# they most need to be right about.
+assert_contains "…and refuses to revoke a key, which would silently undo itself" \
+  "$($S apikey revoke test@foxbyte.dev whatever 2>&1 | head -1)" "a key revoked here would be undone"
+sleep 12   # one round of the carrier
+assert_contains "…and reads the primary's document from its own copy" \
+  "$($S ha status 2>&1 | sed -n '/=== accounts and keys ===/,/=== reads/p')" "are a copy of the primary's, current as of"
+rm -f "$HOME/$BRAND_STATE_DIR/node-joined.json"
+assert_eq "…and owns them again once it follows nobody" \
+  "$($S ha status 2>&1 | grep -c 'this node owns the accounts and keys')" "1"
+
+# The role passwords, which are the other half of a failover between machines:
+# a copy carries the *primary's* roles, whose passwords come from the primary's
+# install secret, and `node join` carries no secret. Phase 7 measured what that
+# costs; the promotion rewrites them instead. Reproduced here by changing one
+# role's password behind the gateway, which is the same divergence.
+RRKEY="$($S apikey create test@foxbyte.dev rr 2>/dev/null | grep -o 'key_[A-Za-z0-9_-]*')"
+assert_eq "a client reaches main as itself" \
+  "$(PGPASSWORD="$RRKEY" psql "$GATEWAY/main" -tAc 'select session_user' 2>&1 | head -1)" "test@foxbyte.dev"
+sudo docker exec pg-main psql -U dbadmin -d "$DB_DATABASE" -qc "ALTER ROLE \"test@foxbyte.dev\" PASSWORD 'not-the-derived-one'" >/dev/null 2>&1
+assert_contains "…and fails once that role's password is not the one this install derives" \
+  "$(PGPASSWORD="$RRKEY" psql "$GATEWAY/main" -tAc 'select 1' 2>&1 | head -1)" "authentication failed"
+assert_contains "\`ha repair-roles\` rewrites only the roles this install manages" \
+  "$($S ha repair-roles 2>&1 | head -1)" "test@foxbyte.dev"
+assert_eq "…and the client works again, holding the same key" \
+  "$(PGPASSWORD="$RRKEY" psql "$GATEWAY/main" -tAc 'select session_user' 2>&1 | head -1)" "test@foxbyte.dev"
+$S user delete shipped@foxbyte.dev >/dev/null 2>&1
+# ---- end phase 2 -----------------------------------------------------------
+
 # ---- who may copy the database (HA plan phase 1) ---------------------------
 #
 # `ha enable` used to append `host replication all all` and let the standby

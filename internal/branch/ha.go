@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thefoxbyte/foxbyte/internal/auth"
 	"github.com/thefoxbyte/foxbyte/internal/brand"
 )
 
@@ -437,6 +438,13 @@ func HAStatus() error {
 		fmt.Println("replication is asynchronous: commits never wait, and a lost machine costs")
 		fmt.Println("up to archive_timeout (60s) of writes. `fox ha sync on` trades the first for the second.")
 	}
+	fmt.Println("=== accounts and keys ===")
+	if s, err := auth.OpenFromEnv(); err == nil {
+		fmt.Println(DescribeSharedState(s))
+		_ = s.Close()
+	} else {
+		fmt.Printf("this node's account store could not be read: %v\n", err)
+	}
 	fmt.Println("=== reads ===")
 	fmt.Println(DescribeStandbyReads())
 	fmt.Println("=== primary: connected standbys (pg_stat_replication) ===")
@@ -461,6 +469,10 @@ func HAStatus() error {
 // other means. It does not skip stopping the local one.
 func HAFailover(force bool) error {
 	old := PrimaryContainer()
+	// Whether this promotion is of a copy taken from another install, which
+	// decides whether its role passwords have to be rewritten. Read before the
+	// promotion clears the join state.
+	fromElsewhere := IsStandbyNode()
 	if err := haGuard("failover", old); err != nil {
 		return err
 	}
@@ -500,6 +512,23 @@ func HAFailover(force bool) error {
 				"  machine never sees, and nothing could merge the two. Bring it back with\n"+
 				"  `%s node join` against this machine, which replaces its copy.\n",
 				j.Address, brand.CLI)
+		}
+	}
+	// A copy from another install carries that install's role passwords, all of
+	// them derived from a secret this machine does not have and must not be
+	// given (rolepasswords.go). The gateway here derives its own, so without
+	// this every client connection to the machine that just took over would
+	// fail to authenticate — which phase 7 measured, and which is the other
+	// half of what phase 2 exists to prevent.
+	if fromElsewhere {
+		touched, err := RewriteRolePasswords("standby")
+		if err != nil {
+			fmt.Printf("\nWARNING: the promotion succeeded, but the copy's role passwords are still the\n"+
+				"other install's (%v). Clients will fail to authenticate until they are rewritten:\n"+
+				"  %s ha repair-roles\n\n", err, brand.CLI)
+		} else {
+			fmt.Printf("rewrote %d role password(s) to this install's own — the copy was made with\n"+
+				"another machine's secret, and nothing here knows it.\n", len(touched))
 		}
 	}
 	// Zero-data-loss mode does not survive the promotion, and must not.

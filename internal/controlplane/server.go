@@ -103,6 +103,12 @@ func Serve(addr string) error {
 	// And proof that they restore: a backup nothing has ever restored is a hope,
 	// not a backup.
 	branch.StartRestoreVerifier()
+	// Accounts and keys reach the other machine (HA plan phase 2), so a
+	// failover does not leave nobody able to sign in. One process per node does
+	// this and this is it: the gateway and the agent API hold the same store,
+	// and three writers carrying the same document would be three chances to
+	// carry it wrongly.
+	branch.StartStateSync(store)
 
 	handler := httpx.CORS(store.WebOrigin())(logging(httpx.LimitBodies(httpx.MaxBody, isUpload)(mux)))
 
