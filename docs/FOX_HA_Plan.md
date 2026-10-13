@@ -148,8 +148,24 @@ So the real failure is not "the licence lapses 14 days after a failover". It is:
 Which inverts the question. It is not "how do we stop the licence lapsing"; it
 is "how does the second machine come to have a licence at all" — and until now
 nothing told an operator that it did not. `fox node join` says so now, naming
-what promotion would cost and that a site licence covers both nodes. That part
-was engineering rather than policy. The policy below is still a decision.
+what promotion would cost and that a site licence covers both nodes.
+
+And `fox check`'s **licence** line says it on every run, because the join says
+it once. Somebody who joined a month ago and has since let a licence lapse is
+the person in the state that matters, and a one-time message at join is no use
+to them. The clause adds the consequence and never changes the severity: an
+absent licence warns on any install and warns here, a lapsed one fails on any
+install and fails here. Being a standby does not make a licence problem milder
+or worse — it makes it mean something extra.
+
+The same line also corrects the misreading this section used to encourage. On a
+standby with a licence activated elsewhere it says the licence "still unlocks
+the paid features, here and after a promotion", because the obvious reading of
+"activated on a different machine" is that a promotion will cost them, and it
+will not.
+
+That part was engineering rather than policy. The policy below is still a
+decision.
 
 There is already an escape hatch: an empty fingerprint is a **site licence**
 ([license.go:59](../internal/license/license.go)). So this is a licensing

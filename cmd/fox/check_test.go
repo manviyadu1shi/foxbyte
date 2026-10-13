@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/thefoxbyte/foxbyte/internal/branch"
+	"github.com/thefoxbyte/foxbyte/internal/license"
 )
 
 // Where the backups go, as `fox check` reports it.
@@ -201,6 +202,91 @@ func TestReplicationAccessLine(t *testing.T) {
 		}
 		if asked != 0 {
 			t.Errorf("pg_hba was read %d time(s) with no standby to admit", asked)
+		}
+	})
+}
+
+// The licence line, and the clause it adds on a machine that is a standby for
+// a primary elsewhere.
+//
+// `node join` says this once, at join time. Somebody who joined a month ago and
+// has since let a licence lapse is in the state that matters, and this is where
+// they would look — so the clause belongs on a line that is printed every run.
+func TestLicenceLine(t *testing.T) {
+	none := license.License{}
+	active := license.License{ID: "LIC-1", Customer: "Acme"}
+
+	t.Run("no licence on a standby names what a promotion would cost", func(t *testing.T) {
+		got := licenceLine(true, true, none, license.Status{}, true)
+		if got.state != stateWarn {
+			t.Fatalf("state %d, want a warning", got.state)
+		}
+		for _, want := range []string{"this machine is a standby", "stop the paid features", "no grace period"} {
+			if !strings.Contains(got.detail, want) {
+				t.Errorf("detail %q does not mention %q", got.detail, want)
+			}
+		}
+		// And what to ask for, since one licence can cover both nodes.
+		if !strings.Contains(got.fix, "site licence") {
+			t.Errorf("fix %q does not mention a site licence", got.fix)
+		}
+	})
+
+	t.Run("no licence on a normal install is unchanged", func(t *testing.T) {
+		// The existing judgement, which this must not have altered.
+		got := licenceLine(true, false, none, license.Status{}, true)
+		if got.state != stateWarn || got.detail != "none installed" {
+			t.Errorf("a normal install's line changed: %d %q", got.state, got.detail)
+		}
+	})
+
+	t.Run("a Standard build is still uninteresting, standby or not", func(t *testing.T) {
+		for _, standby := range []bool{false, true} {
+			got := licenceLine(false, standby, none, license.Status{}, true)
+			if got.state != stateOK {
+				t.Errorf("standby=%v: a Standard build was flagged", standby)
+			}
+		}
+	})
+
+	t.Run("a mismatched fingerprint on a standby says it survives promotion", func(t *testing.T) {
+		// The correction to the plan's §3.1: a mismatch never lapses. The
+		// obvious reading of "activated on a different machine" is that a
+		// promotion will cost the paid features, and it will not.
+		st := license.Status{State: license.Warning, Reason: "this licence was activated on a different machine",
+			Action: "run `fox license rebind` to move it here"}
+		got := licenceLine(true, true, active, st, false)
+		if got.state != stateWarn {
+			t.Fatalf("state %d, want a warning", got.state)
+		}
+		if !strings.Contains(got.detail, "still unlocks") || !strings.Contains(got.detail, "after a promotion") {
+			t.Errorf("detail %q does not say the licence survives a promotion", got.detail)
+		}
+	})
+
+	t.Run("the standby clause never changes the severity", func(t *testing.T) {
+		// Being a standby makes a licence problem mean something extra, not
+		// something milder or worse. The first version downgraded a lapsed
+		// licence to a warning on a standby, which was backwards.
+		lapsed := license.Status{State: license.Lapsed, Reason: "the licence expired", Action: "renew it"}
+		for _, standby := range []bool{false, true} {
+			if got := licenceLine(true, standby, active, lapsed, false); got.state != stateFail {
+				t.Errorf("standby=%v: a lapsed licence is %d, want a failure", standby, got.state)
+			}
+		}
+		// And the standby one still carries the consequence.
+		got := licenceLine(true, true, active, lapsed, false)
+		if !strings.Contains(got.detail, "standby") {
+			t.Errorf("a lapsed licence on a standby does not say so: %q", got.detail)
+		}
+	})
+
+	t.Run("an active licence is reported the same either way", func(t *testing.T) {
+		st := license.Status{State: license.Active}
+		a := licenceLine(true, false, active, st, false)
+		b := licenceLine(true, true, active, st, false)
+		if a.state != stateOK || b.state != stateOK || a.detail != b.detail {
+			t.Errorf("an active licence differs on a standby:\n %q\n %q", a.detail, b.detail)
 		}
 	})
 }
