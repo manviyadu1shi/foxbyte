@@ -373,6 +373,47 @@ echo "### 6. HA: replication + failover + failback"
 $S ha enable >/dev/null 2>&1; sleep 2
 assert_eq "standby is streaming" "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
 
+# ---- who may copy the database (HA plan phase 1) ---------------------------
+#
+# `ha enable` used to append `host replication all all` and let the standby
+# connect as the bootstrap superuser: any role, from any address, with the
+# credential that owns the database. These assert the replacement against a
+# live install, because that is the only place pg_hba means anything.
+assert_eq "the standby connects as a role of its own, not the superuser" \
+  "$(pg pg-main "SELECT usename FROM pg_stat_replication")" "db_replica"
+# Two assertions rather than one concatenation: Postgres renders a boolean cast
+# to text as "true"/"false", not the t/f that -At prints for a bare boolean, so
+# the first version of this compared against "ft" and read "falsetrue".
+assert_eq "…which is not a superuser" \
+  "$(pg pg-main "SELECT usesuper FROM pg_user WHERE usename='db_replica'")" "f"
+assert_eq "…and may replicate" \
+  "$(pg pg-main "SELECT userepl FROM pg_user WHERE usename='db_replica'")" "t"
+assert_eq "…holds no table grants" \
+  "$(pg pg-main "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee='db_replica'")" "0"
+assert_eq "…and is a member of nothing" \
+  "$(pg pg-main "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='db_replica'")" "0"
+# The rule, and the absence of the one it replaced. pg_hba is first-match-wins,
+# so the wide rule left anywhere in the file would still admit everyone.
+assert_eq "the wide rule is gone from pg_hba, not merely outranked" \
+  "$(sudo docker exec -u postgres pg-main bash -c 'grep -cE "^host[[:space:]]+replication[[:space:]]+all[[:space:]]+all" "$PGDATA/pg_hba.conf" || true')" "0"
+assert_eq "…replaced by one naming the role and this install's own network" \
+  "$(sudo docker exec -u postgres pg-main bash -c 'grep -cF "host replication db_replica samenet scram-sha-256" "$PGDATA/pg_hba.conf" || true')" "1"
+# The property that matters, asked of Postgres rather than of the file: the
+# superuser can no longer open a replication connection over the network, while
+# its ordinary connections are untouched.
+cp "$HOME/$BRAND_STATE_DIR/pg.env" /tmp/su.env 2>/dev/null; chmod 600 /tmp/su.env 2>/dev/null
+assert_contains "the superuser can no longer replicate from the network" \
+  "$(sudo docker run --rm --network dbnet --env-file /tmp/su.env "$(sudo docker inspect -f '{{.Config.Image}}' pg-main)" \
+      psql "postgresql://dbadmin@pg-main/appdb?replication=true" -tAc "IDENTIFY_SYSTEM" 2>&1 | head -1)" \
+  "no pg_hba.conf entry"
+assert_eq "…while its ordinary connections still work" \
+  "$(sudo docker run --rm --network dbnet --env-file /tmp/su.env "$(sudo docker inspect -f '{{.Config.Image}}' pg-main)" \
+      psql "postgresql://dbadmin@pg-main/appdb" -tAc "SELECT 'ordinary-ok'" 2>&1 | head -1)" "ordinary-ok"
+rm -f /tmp/su.env
+assert_eq "\`check\` says only that role may copy it" \
+  "$($S check 2>&1 | grep -c '^ok    replication .*db_replica')" "1"
+# ---- end phase 1 -----------------------------------------------------------
+
 # ---- zero-data-loss mode (HA plan phase 5) --------------------------------
 #
 # Every write in this block is wrapped in `timeout`, because the failure this
@@ -683,6 +724,14 @@ echo "### 11d. the first run: sample data, check, connect (onboarding batch 1)"
 # The suites run with FOX_NO_DEMO=1 (scripts/lib/test_guard.sh), so the seed is
 # exercised here, deliberately, on a branch of its own.
 $S branch delete demoseed >/dev/null 2>&1
+# From main, before the clone, because a branch is a clone of main and this
+# section's first assertion is that the seed has *not* run on it. The suites set
+# FOX_NO_DEMO=1 (lib/test_guard.sh) so they never seed it themselves — but a
+# `fox start` run by hand on this VM does, and then the clone inherits three
+# tables and two assertions here fail for a reason that has nothing to do with
+# the seed. Safe to drop: test_guard.sh refuses to run this suite anywhere but
+# the throwaway VM.
+pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS public.events, public.projects, public.users CASCADE" >/dev/null 2>&1
 $S branch create demoseed >/dev/null 2>&1
 # Not "the branch is empty": it is a clone of main, which earlier sections wrote
 # to. What matters is that the sample tables are not there until the seed runs.

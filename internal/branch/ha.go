@@ -94,12 +94,27 @@ func haGuard(action, primary string) error {
 	return nil
 }
 
-// allowReplication lets standbys connect to a primary for streaming replication.
+// allowReplication lets a standby connect to a primary for streaming
+// replication: the role that may do it, and the one rule that admits it.
+//
+// This used to append `host replication all all` and let the standby connect as
+// the superuser. See replicationrole.go for what that meant and what replaced
+// it. The wide rule is removed rather than left below the narrow one, because
+// pg_hba is first-match-wins and a wide rule anywhere still admits everyone it
+// names.
 func allowReplication(primary string) error {
-	quiet("docker", "exec", "-u", "postgres", primary, "bash", "-c",
-		`grep -q '^host replication' "$PGDATA/pg_hba.conf" || echo 'host replication all all scram-sha-256' >> "$PGDATA/pg_hba.conf"`)
-	return run("docker", "exec", "--env-file", pgEnvFile(), primary,
-		"psql", "-U", pgUser, "-d", pgDatabase, "-c", "SELECT pg_reload_conf();")
+	if err := EnsureReplicationRole(primary); err != nil {
+		return err
+	}
+	if out, err := captureCombined("docker", "exec", "-u", "postgres", primary,
+		"bash", "-c", hbaScript()); err != nil {
+		return fmt.Errorf("narrowing the replication rule on %s: %w\n%s", primary, err, strings.TrimSpace(out))
+	}
+	if out, err := captureCombined("docker", "exec", "--env-file", pgEnvFile(), primary,
+		"psql", "-U", pgUser, "-d", pgDatabase, "-tAq", "-c", "SELECT pg_reload_conf()"); err != nil {
+		return fmt.Errorf("reloading %s after narrowing the replication rule: %w\n%s", primary, err, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // startStandbyContainer runs the standby's Postgres on its storage. Before a
@@ -194,11 +209,11 @@ func standbySlotWanted() bool { return RealtimeOn() && SlotSyncSupported() }
 func baseBackupArgs(from, dataDir string, conninfoDB bool) []string {
 	if !conninfoDB {
 		return []string{
-			"pg_basebackup", "-h", from, "-U", pgUser, "-D", dataDir,
+			"pg_basebackup", "-h", from, "-U", ReplicationRole, "-D", dataDir,
 			"-R", "-X", "stream", "-c", "fast",
 		}
 	}
-	conninfo := fmt.Sprintf("host=%s user=%s dbname=%s", from, pgUser, pgDatabase)
+	conninfo := fmt.Sprintf("host=%s user=%s dbname=%s", from, ReplicationRole, pgDatabase)
 	return []string{
 		"pg_basebackup", "-d", conninfo, "-D", dataDir,
 		"-R", "-X", "stream", "-c", "fast",
@@ -325,7 +340,7 @@ func HAEnable() error {
 	// WAL. The standby's replication slot is deliberately not involved here;
 	// see baseBackupArgs.
 	if err := run("docker", append([]string{"run", "--rm", "--user", pgUID, "--network", network,
-		"--env-file", pgEnvFile(),
+		"--env-file", replicaEnvFile(),
 		"-v", store.standbyPath() + ":/data",
 		pgImage()},
 		baseBackupArgs(primary, "/data/pgdata", standbySlotWanted())...)...); err != nil {
@@ -568,7 +583,7 @@ func HAFailback() error {
 	// A failback is minutes long and ends with main as a primary again; the new
 	// standby that `ha enable` then builds gets the slot.
 	if err := run("docker", append([]string{"run", "--rm", "--user", pgUID, "--network", network,
-		"--env-file", pgEnvFile(),
+		"--env-file", replicaEnvFile(),
 		"-v", mountpoint("main") + ":/data",
 		pgImage()},
 		baseBackupArgs(standby, "/data/pgdata", standbySlotWanted())...)...); err != nil {

@@ -152,3 +152,55 @@ func TestDurabilityLine(t *testing.T) {
 		}
 	})
 }
+
+// Who may copy the database. The warning case is the upgrade path: `ha enable`
+// used to write a rule admitting any role from any address, that rule lives in
+// the data directory, and a routine `fox update` has no reason to rewrite it.
+func TestReplicationAccessLine(t *testing.T) {
+	wide := func(string) bool { return true }
+	narrow := func(string) bool { return false }
+
+	t.Run("an older install's wide rule warns, and names what it costs", func(t *testing.T) {
+		got := replicationAccessLine(branch.HAState{Enabled: true}, wide)
+		if got.state != stateWarn {
+			t.Fatalf("state %d, want a warning", got.state)
+		}
+		// The consequence, not the configuration: "pg_hba is wide" is a note,
+		// "the credential that copies the database is the one that owns it" is
+		// a reason to act.
+		for _, want := range []string{"any role at any address", "the one that owns it"} {
+			if !strings.Contains(got.detail, want) {
+				t.Errorf("detail %q does not mention %q", got.detail, want)
+			}
+		}
+		if !strings.Contains(got.fix, "ha enable") {
+			t.Errorf("fix %q does not name what narrows it", got.fix)
+		}
+	})
+
+	t.Run("a narrowed install says who may copy it and what they cannot do", func(t *testing.T) {
+		got := replicationAccessLine(branch.HAState{Enabled: true}, narrow)
+		if got.state != stateOK {
+			t.Fatalf("state %d, want ok", got.state)
+		}
+		for _, want := range []string{branch.ReplicationRole, "can read none of it"} {
+			if !strings.Contains(got.detail, want) {
+				t.Errorf("detail %q does not mention %q", got.detail, want)
+			}
+		}
+	})
+
+	t.Run("no standby, so nothing may copy it, and pg_hba is not read", func(t *testing.T) {
+		// Reading it costs a `docker exec`, and with no standby there is no
+		// rule to judge.
+		asked := 0
+		counting := func(string) bool { asked++; return true }
+		got := replicationAccessLine(branch.HAState{}, counting)
+		if got.state != stateOK {
+			t.Errorf("state %d, want ok", got.state)
+		}
+		if asked != 0 {
+			t.Errorf("pg_hba was read %d time(s) with no standby to admit", asked)
+		}
+	})
+}

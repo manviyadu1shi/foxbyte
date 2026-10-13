@@ -67,7 +67,8 @@ func checkCmd(args []string) {
 	lines = append(lines, checkServers()...)
 	lines = append(lines, checkPorts()...)
 	lines = append(lines, checkAPI(), checkAPIClosed(), checkBlackbox(), checkAnchors(), checkRealtime(),
-		checkDurability(), checkBackupTarget(), checkBackups(), checkRestore(), checkSampleData())
+		checkDurability(), checkReplicationAccess(), checkBackupTarget(), checkBackups(),
+		checkRestore(), checkSampleData())
 
 	failed, warned := 0, 0
 	for _, l := range lines {
@@ -385,6 +386,36 @@ func checkRealtime() checkLine {
 // have put anything in the database. It is also the single largest reduction
 // in how much data an incident can cost, and it needs no new code to fix —
 // which is why it is said on every `check` until it is done.
+// checkReplicationAccess reports who may copy this database.
+//
+// It exists for the upgrade path. `ha enable` used to append `host replication
+// all all` to the primary's pg_hba.conf — any role, from any address — and that
+// line lives in the data directory, where a routine `fox update` has no reason
+// to touch it. So an install whose HA was enabled by an older version keeps it
+// until something rewrites the file, and the only thing that does is another
+// `ha enable`. Nothing would have said so.
+func checkReplicationAccess() checkLine {
+	return replicationAccessLine(branch.HAInfo(), branch.ReplicationOpenToEveryone)
+}
+
+// replicationAccessLine is the judgement, given the state and a way to ask the
+// primary. A function rather than a bool so pg_hba is only read in the one case
+// that can need it, and so this is testable without a pool.
+func replicationAccessLine(ha branch.HAState, wideOpen func(string) bool) checkLine {
+	if !ha.Enabled {
+		return ok("replication", "nothing may copy this database: no standby, and no rule admitting one")
+	}
+	if wideOpen(branch.PrimaryContainer()) {
+		return warn("replication",
+			"the primary admits a replication connection from any role at any address — a rule an "+
+				"older version wrote, and the credential that copies the database is the one that owns it",
+			fmt.Sprintf("%s ha enable   — narrows it to the %s role, which can copy and cannot read",
+				brand.CLI, branch.ReplicationRole))
+	}
+	return ok("replication", fmt.Sprintf("only %s may copy it, from this install's own network, and it "+
+		"can read none of it", branch.ReplicationRole))
+}
+
 // checkDurability reports what a commit means, and shouts when commits cannot
 // complete.
 //
