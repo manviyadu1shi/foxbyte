@@ -132,25 +132,77 @@ func checkEdition() checkLine {
 func checkLicense() checkLine {
 	l, _, _, err := license.Load()
 	if err == license.ErrNone {
-		if edition.Enterprise {
-			return warn("licence", "none installed",
-				fmt.Sprintf("%s license activate <file>", brand.CLI))
-		}
-		// A Standard build has nothing to unlock, so no licence is the correct
-		// and uninteresting state rather than something to flag.
-		return ok("licence", "not needed by the standard edition")
+		return licenceLine(edition.Enterprise, branch.IsStandbyNode(), license.License{}, license.Status{}, true)
 	}
 	if err != nil {
 		return warn("licence", err.Error(), fmt.Sprintf("%s license show", brand.CLI))
 	}
-	st := license.Install()
+	return licenceLine(edition.Enterprise, branch.IsStandbyNode(), l, license.Install(), false)
+}
+
+// licenceLine is the judgement: what this install's licence is doing, and —
+// when this machine is a standby for a primary elsewhere — what a promotion
+// would do to it.
+//
+// The standby clause exists because `node join` says this once, at join time,
+// and nothing said it again. Somebody who joined a month ago and has since let
+// a licence lapse is in the state that matters, and `fox check` is where they
+// would look. A licence is per-install state (~/.fox/license.json) and joining
+// copies the primary's database, not its state directory, so an unlicensed
+// standby is the default rather than an oversight.
+//
+// The standby clause adds the consequence and never changes the severity. An
+// absent licence warns on any install and warns here; a lapsed one fails on any
+// install and fails here. Being a standby does not make a licence problem
+// milder or worse — it makes it mean something extra, which is that a promotion
+// would stop the paid features on this machine as well.
+//
+// Pure, so each combination is read in a test rather than assembled on a
+// machine that happens to be in that state.
+func licenceLine(enterprise, standby bool, l license.License, st license.Status, none bool) checkLine {
+	if none {
+		if !enterprise {
+			// A Standard build has nothing to unlock, so no licence is the
+			// correct and uninteresting state rather than something to flag.
+			return ok("licence", "not needed by the standard edition")
+		}
+		if standby {
+			return warn("licence",
+				"none installed, and this machine is a standby — a promotion would stop the paid "+
+					"features here, with no grace period",
+				fmt.Sprintf("%s license activate <file>   — or ask for a site licence, which covers both nodes",
+					brand.CLI))
+		}
+		return warn("licence", "none installed",
+			fmt.Sprintf("%s license activate <file>", brand.CLI))
+	}
 	switch st.State {
 	case license.Active:
 		return ok("licence", fmt.Sprintf("%s — %s, to %s", l.ID, l.Customer,
 			l.NotAfter.UTC().Format("2 January 2006")))
 	case license.Warning:
+		if standby {
+			// A warning is either an expiry inside the 14-day grace or a
+			// fingerprint mismatch, and both unlock the paid features today.
+			// Worth saying on a standby specifically, because the obvious
+			// reading of "activated on a different machine" is that a promotion
+			// will cost them, and it will not: the grace applies to expiry
+			// only, so a mismatch never lapses. docs/FOX_HA_Plan.md §3.1
+			// assumed otherwise and was corrected.
+			return warn("licence", st.Reason+" — it still unlocks the paid features, here and after a promotion",
+				st.Action)
+		}
 		return warn("licence", st.Reason, st.Action)
 	default:
+		// A lapsed or invalid licence is a failure on any install, and being a
+		// standby does not make it less so: the clause adds the consequence,
+		// it does not change the severity. Downgrading it here was the first
+		// version of this, and it was backwards.
+		if standby {
+			return fail("licence",
+				st.Reason+", and this machine is a standby — a promotion would stop the paid features here too",
+				st.Action)
+		}
 		return fail("licence", st.Reason, st.Action)
 	}
 }
