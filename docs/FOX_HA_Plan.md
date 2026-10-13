@@ -472,7 +472,7 @@ Still to decide: *which* store, now that `main` is out. A small Postgres that is
 itself replicated, the monitor node phase 3 introduces, or a consensus store —
 each with the operational cost §2 of this review named for a two-server shop.
 
-### Phase 3 — automatic failover with fencing (large)
+### Phase 3 — automatic failover with fencing (large) — **fencing done; the manager is a decision**
 
 Wrap `pg_auto_failover` or Patroni; do not write one. The document's reasoning
 is right and the recommendation stands. For an on-prem appliance I lean
@@ -484,6 +484,76 @@ The gateway stops asking "which container on this host is primary"
 virtual IP the customer provides.
 
 Unlocks: recovery in about a minute with nobody awake.
+
+#### Fencing came first, because phase 1 shipped a split brain
+
+On one machine `HAFailover` stops the old primary before promoting the standby,
+and "stop the old primary" is the whole of fencing when both are containers
+here. Across machines it stopped the wrong thing: `PrimaryContainer()` is *this*
+host's `pg-main`, which on a joined node is an idle database nobody uses, while
+the real primary went on serving writes somewhere else.
+
+Measured, with the primary deliberately left healthy:
+
+```
+node 1 main container:   running
+node 1 accepts a write:  yes
+node 2 accepts a write:  yes      ← pg_is_in_recovery() = f
+```
+
+Two primaries, diverging, with nothing to say so. That shipped in the `node
+join` change and is fixed here: `ha failover` on a machine that follows a
+remote primary probes it first and refuses while it answers. Verified both
+ways — refused with the primary alive and the standby left in recovery,
+promoted when the primary was genuinely stopped.
+
+`--force` exists for a primary an operator has already isolated by other means,
+and warns in the words that matter: "both machines are about to accept writes
+and the two copies will diverge with no way to merge them."
+
+A promotion also now says what must happen to the old primary: it **must not**
+be started as a primary again, because it would accept writes the survivor
+never sees. `node join` against the survivor is the way back, and it replaces
+that copy.
+
+**What the fence does not do, said plainly rather than implied.** It cannot tell
+a dead primary from one this machine merely cannot reach. If the network is
+partitioned and clients can still reach the primary, forcing a promotion
+produces exactly the split brain above, and no amount of local probing can
+distinguish the two cases. That needs a third opinion — which is the rest of
+this phase.
+
+#### The manager: the evidence has moved since this plan was written
+
+The plan leans `pg_auto_failover` over Patroni, for reasons that still hold: one
+monitor to protect is a smaller operational ask than a three-node etcd cluster,
+and it does not put a Python runtime on every database node. What has changed is
+the state of the project.
+
+| | |
+|---|---|
+| Last tagged release | **v2.2, April 2025** — about eighteen months old |
+| PostgreSQL 18 | the README claims 13–18, and PGDG packages `postgresql-18-auto-failover 2.2-4.pgdg12+1`, which **is installable in this engine's image** (checked) |
+| PG 17/18/19 work | merged to `main`, not in any tagged release |
+
+So it is installable, and the version that supports what we ship is partly
+untagged. For an appliance that a bank runs on-premises, "the HA manager's last
+release predates the database it manages" is a procurement question as much as a
+technical one.
+
+**And either choice collides with what phases 4 and 5 built.** A failover manager
+wants to own the Postgres lifecycle: `pg_autoctl` starts and stops the server,
+writes its own configuration, and — the direct conflict — manages
+`synchronous_standby_names` itself. Phase 5 just made that setting ours, with
+`fox ha sync on` asserting the standby is counted and rolling back if not. Two
+things managing one GUC is not a configuration, it is a bug waiting for an
+incident. The same goes for `postgresArgs`, `startContainer` as the supervisor,
+and the primary pointer the gateway reads.
+
+That is not an argument against the phase. It is an argument that it is a
+rewrite of how this engine runs Postgres rather than a wrapper around it, and
+that the decision deserves the measurement before the code — which is what the
+remaining decisions in §6 are for.
 
 ### Phase 4 — failover-aware realtime slots — **done**
 
@@ -852,5 +922,11 @@ pitch is a tamper-evident record. Route B is a different product.
    would not.
 2. **Where shared state lives** (3.2) — *narrowed*: not main itself, for the
    availability reason measured in 3.2. Which separate store is still open.
-3. **Failover manager** — `pg_auto_failover` or Patroni.
+3. **Failover manager** — `pg_auto_failover` or Patroni. *Narrowed by
+   measurement:* `pg_auto_failover` is installable for PostgreSQL 18 in this
+   engine's image (`postgresql-18-auto-failover 2.2-4.pgdg12+1`), but its last
+   tagged release is April 2025 and the PG 17/18/19 work is untagged on `main`.
+   Either manager wants to own the Postgres lifecycle, including
+   `synchronous_standby_names`, which phase 5 made ours — so this is a rewrite
+   of how the engine runs Postgres, not a wrapper around it.
 4. **Whether the customer supplies the virtual IP**, or we ship something.

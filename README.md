@@ -413,7 +413,7 @@ line saying so.
 ```bash
 fox ha enable                   # hot standby streaming from main
 fox ha status
-fox ha failover                 # promote the standby; 'main' reroutes to it
+fox ha failover [--force]       # promote the standby; 'main' reroutes to it
 fox ha disable
 fox ha failback                 # after a failover: back to main's own container, keeping every write
 fox ha sync on | off            # zero data loss: a commit waits for the standby
@@ -435,6 +435,13 @@ runs the copy as a standby, verifying the primary's certificate. Everything else
 then works as it does on one machine: `fox ha status` shows how far behind it is,
 `fox ha failover` promotes it, and `fox ha drill` measures what a failover costs.
 That machine's own `main` sits idle while it follows another primary.
+
+`fox ha failover` on a machine that follows a remote primary refuses while that
+primary still answers — promoting would make a second primary and the two copies
+would diverge, and this command cannot stop a database on another machine. Stop
+it first, or pass `--force` if something else already has. The check cannot tell
+a dead primary from one it merely cannot reach, so a network partition still
+needs a failover manager to arbitrate.
 
 Replication is asynchronous by default: commits never wait, and losing the
 machine costs up to a minute of writes (`archive_timeout=60`). `fox ha sync on`
