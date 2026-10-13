@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thefoxbyte/foxbyte/internal/auth"
 	"github.com/thefoxbyte/foxbyte/internal/brand"
 )
 
@@ -68,6 +69,31 @@ type DrillResult struct {
 	TargetRemote   bool   `json:"target_remote"`
 	PGMajor        string `json:"pg_major"`
 
+	// The topology this drill actually ran in, and who noticed the failure.
+	//
+	// These exist because the report used to disclaim three things in every
+	// copy of it — losing a machine, noticing, and a second site — and after
+	// phases 1, 3 and 7 all three can be true instead. A report that goes on
+	// saying "there is only one site" when there were two is as misleading as
+	// one that claims a site it did not have, and the second kind of mistake
+	// is the only one anybody checks for.
+	Topology  string `json:"topology"`  // "one host" | "two machines"
+	Detection string `json:"detection"` // "manual" | "automatic"
+
+	// Takeover marks a drill measured from the surviving machine rather than
+	// from the one that was killed. It changes what can be measured at all:
+	// RTO then includes noticing, and RPO cannot be measured from this side
+	// because the writer was on the machine that went away.
+	Takeover bool `json:"takeover"`
+
+	// LastReceived is how far the copy had got when the primary stopped
+	// answering — the only thing a surviving machine can say about what it
+	// might be missing.
+	LastReceived string `json:"last_received_lsn,omitempty"`
+
+	// Primary is the address that went away, for a takeover drill.
+	Primary string `json:"primary,omitempty"`
+
 	// Notes carries anything that happened during the drill that the numbers do
 	// not show, so a report is never quietly incomplete.
 	Notes []string `json:"notes,omitempty"`
@@ -88,6 +114,13 @@ func (r DrillResult) Measured() bool { return r.Ran }
 type DrillOptions struct {
 	Writes   int
 	Failback bool
+	// Takeover measures from the surviving machine instead (DrillTakeover).
+	Takeover bool
+	// Wait is how long a takeover drill waits for each step: for the primary
+	// to stop answering, and then for this machine to serve writes. It is a
+	// person pulling a plug on one side and a watcher deciding on the other,
+	// so the default is generous.
+	Wait time.Duration
 }
 
 // archiveTimeoutSeconds is how often the primary closes a WAL segment and ships
@@ -102,6 +135,42 @@ const archiveTimeoutSeconds = 60
 // it goes away in one statement afterwards.
 const drillSchema = "fox_drill"
 
+// What a drill can have been, named rather than spelled out at each use.
+const (
+	TopologyOneHost     = "one host"
+	TopologyTwoMachines = "two machines"
+	DetectionManual     = "manual"
+	DetectionAutomatic  = "automatic"
+)
+
+// drillTopology reports whether the copy this install would promote is on this
+// machine or another one.
+//
+// Read from the join record rather than from pg_stat_replication's client_addr:
+// the record is what `node join` wrote and `ha failover` clears, so it is the
+// same fact every other guard in the engine acts on. A drill that disagreed
+// with the fence about where the primary is would be describing a different
+// install.
+func drillTopology() string {
+	if IsStandbyNode() {
+		return TopologyTwoMachines
+	}
+	return TopologyOneHost
+}
+
+// promotedByWatcher reports whether the last promotion was made by `ha watch`
+// rather than by a person, by asking the security log — which is where the
+// watcher records it, and which phase 2 deliberately keeps on each node so the
+// machine that took over can still be asked.
+func promotedByWatcher(since time.Time) bool {
+	s, err := auth.OpenFromEnv()
+	if err != nil {
+		return false
+	}
+	defer s.Close()
+	return s.HasRecentEvent(auth.EvFailoverPromoted, since)
+}
+
 // Drill runs one. It is destructive of service and not of data: the primary is
 // killed and the standby promoted, which is what `fox ha failover` does on
 // purpose, and every write the standby received survives.
@@ -113,7 +182,21 @@ func Drill(o DrillOptions) (DrillResult, error) {
 	if err := drillReady(); err != nil {
 		return r, err
 	}
+	// A local drill kills this machine's primary and promotes the copy beside
+	// it. On a machine that follows a primary elsewhere there is no local
+	// primary to kill — its own `main` is idle — and the copy here is the one
+	// the *other* machine would lose. Refused rather than attempted, because
+	// what it would actually measure is nothing and what it would report is a
+	// failure that is not one. The site drill is run from here instead, and it
+	// is the other machine that stops.
+	if IsStandbyNode() {
+		j, _ := CurrentJoin()
+		return r, fmt.Errorf("this machine follows the primary at %s:%d, so there is no primary here to "+
+			"end — a site failover is measured from the surviving machine: stop %s and run "+
+			"`%s ha drill --takeover` here", j.Address, j.Port, j.Address, brand.CLI)
+	}
 	primary := PrimaryContainer()
+	r.Topology, r.Detection = drillTopology(), DetectionManual
 	r.SyncMode = SyncActive()
 	r.ArchiveTimeout = archiveTimeoutSeconds
 	r.PGMajor = imageMajor(pgImage())
@@ -181,6 +264,97 @@ func Drill(o DrillOptions) (DrillResult, error) {
 
 // drillReady refuses a drill that could not measure anything, before it kills
 // anything.
+// DrillTakeover measures a site failover from the machine that survives it.
+//
+// The local drill (Drill) kills the primary itself and measures from the kill,
+// which is the only thing one machine can do and which deliberately excludes
+// noticing. Across machines neither of those holds: the primary is somebody
+// else's process, so this waits for it to stop answering, and the clock
+// therefore includes detection — which is the number phase 3 exists to make
+// small, and the number a buyer actually experiences.
+//
+// What it cannot measure is RPO. The writer was on the machine that went away,
+// so nothing here knows what that machine acknowledged to a client in its last
+// moments; the report says so rather than printing a zero that would read as a
+// guarantee. The last WAL position this copy received is reported instead,
+// because it is the one true thing a survivor can say about what it might be
+// missing.
+func DrillTakeover(o DrillOptions) (DrillResult, error) {
+	r := DrillResult{At: time.Now().UTC(), Takeover: true, Detection: DetectionManual}
+	j, ok := CurrentJoin()
+	if !ok {
+		return r, fmt.Errorf("this machine is not following a primary, so there is no takeover to "+
+			"measure — `%s ha drill` measures a failover between containers on one host, and "+
+			"`--takeover` measures one between machines, run from the survivor", brand.CLI)
+	}
+	if ContainerState("standby") != "running" {
+		return r, fmt.Errorf("this machine has no running copy to take over with — `%s ha status` says "+
+			"what it is doing", brand.CLI)
+	}
+	r.Topology, r.Primary = TopologyTwoMachines, fmt.Sprintf("%s:%d", j.Address, j.Port)
+	r.ArchiveTimeout = archiveTimeoutSeconds
+	r.PGMajor = imageMajor(pgImage())
+	r.SyncMode = SyncOn()
+	if t, err := CurrentTarget(); err == nil {
+		r.Target, r.TargetRemote = t.Describe(), t.Remote()
+	}
+
+	cont := container("standby")
+	fmt.Printf("watching %s. Stop it now — pull its power, or `%s stop` there — and this will\n",
+		r.Primary, brand.CLI)
+	fmt.Printf("measure what the takeover costs from this side.\n\n")
+	if err := pollUntil(fmt.Sprintf("%s to stop answering", r.Primary), o.Wait, func() bool {
+		return !RemotePrimaryAnswering(j, 3*time.Second)
+	}); err != nil {
+		return r, fmt.Errorf("%w — nothing was measured and nothing was changed", err)
+	}
+	downAt := time.Now()
+	// Read before the promotion, because promoting ends recovery and with it
+	// the view that can answer this.
+	r.LastReceived = haQuery(cont, "SELECT coalesce(pg_last_wal_receive_lsn()::text, '')")
+	r.Ran = true
+	fmt.Printf("%s stopped answering. Waiting for this machine to serve writes …\n", r.Primary)
+
+	// Whoever promotes it: `ha watch` if it is running, or a person. This only
+	// measures; a drill that promoted the copy itself would be measuring its
+	// own call and not the recovery anybody will have.
+	if err := pollUntil("this machine to accept a write", o.Wait, func() bool {
+		return !IsStandbyNode() && drillServing(PrimaryContainer())
+	}); err != nil {
+		r.Notes = append(r.Notes, "nothing promoted this machine: "+err.Error())
+		return r, fmt.Errorf("%w\nIt is still a copy. `%s ha watch --witness <url>` promotes it "+
+			"unattended, or `%s ha failover` by hand", err, brand.CLI, brand.CLI)
+	}
+	r.TimeToService = time.Since(downAt)
+	if promotedByWatcher(downAt) {
+		r.Detection = DetectionAutomatic
+	}
+	// No Survived and no LostRows: the writer was on the machine that went
+	// away, so the rows in this table are the drill's own and comparing them to
+	// anything would be inventing a figure. The report says so where a number
+	// would otherwise be.
+	drillCleanup(PrimaryContainer())
+	return r, nil
+}
+
+// drillServing reports whether this machine's primary is out of recovery and
+// takes a write.
+//
+// It prepares the drill's schema here rather than up front, which the local
+// drill can do and this cannot: until the promotion the copy is in recovery and
+// refuses every write, including the CREATE that would prepare it. So the
+// preparation is part of the question — and a machine that cannot be prepared
+// is not serving, which is the answer either way.
+func drillServing(cont string) bool {
+	if haQuery(cont, "SELECT pg_is_in_recovery()") != "f" {
+		return false
+	}
+	if err := drillPrepare(cont); err != nil {
+		return false
+	}
+	return drillWrite(cont, -1) == nil
+}
+
 func drillReady() error {
 	if ContainerState("standby") == "absent" {
 		return fmt.Errorf("a drill needs a standby to fail over to, and this install has none.\n"+
@@ -328,20 +502,48 @@ func (r DrillResult) Report() string {
 	p := func(f string, a ...any) { fmt.Fprintf(&b, f, a...) }
 
 	p("# Failover drill — %s\n\n", r.At.Format(time.RFC3339))
-	p("A real failover: the primary was killed with SIGKILL half way through %d writes, with\n", r.Writes)
-	p("more still arriving, and the standby was promoted through `%s ha failover`.\n\n", brand.CLI)
+	if r.Takeover {
+		p("A real site failover, measured from the machine that survived it: %s stopped\n", r.Primary)
+		p("answering and this machine took over. Nothing here stopped it and nothing here\n")
+		p("promoted itself — both are what the drill was watching for.\n\n")
+	} else {
+		p("A real failover: the primary was killed with SIGKILL half way through %d writes, with\n", r.Writes)
+		p("more still arriving, and the standby was promoted through `%s ha failover`.\n\n", brand.CLI)
+	}
 
 	p("## Measured\n\n")
 	p("| | |\n|---|---|\n")
-	p("| Writes acknowledged to the client | %d, at %.0f/s |\n", r.Acked, r.WritesPerSecond)
-	p("| Acknowledged writes lost (RPO) | **%d** |\n", r.LostRows)
-	if r.LostRows > 0 && r.WritesPerSecond > 0 {
-		p("| …which at that rate is | **%.1fs** of writes |\n",
-			float64(r.LostRows)/r.WritesPerSecond)
+	if r.Takeover {
+		// No acknowledged-writes figure and no RPO: the writer was on the
+		// machine that went away, so nothing here knows what it told a client
+		// in its last moments. A "0" would read as a guarantee of none, which
+		// is the one thing a survivor cannot know.
+		p("| Unreachable to serving writes here (RTO) | **%s** |\n", r.TimeToService.Round(100*time.Millisecond))
+		if r.Detection == DetectionAutomatic {
+			p("| Who noticed | `%s ha watch`, with a witness agreeing |\n", brand.CLI)
+		} else {
+			p("| Who noticed | a person |\n")
+		}
+		p("| Last WAL position this copy had received | %s |\n", lsnOrUnknown(r.LastReceived))
+		p("| Acknowledged writes lost (RPO) | **not measurable from this side** |\n")
+		p("\nRTO above starts when the primary stopped answering, so it *includes* noticing —\n")
+		p("unlike a drill run on one host, which starts at a kill it performed itself. This is\n")
+		p("the number a client experiences.\n\n")
+		p("RPO cannot be measured here and is not guessed at. The writer was on the machine\n")
+		p("that went away; what it acknowledged in its last moments is known only to it and,\n")
+		p("for whatever it managed to ship, to the archive. The WAL position above is the one\n")
+		p("true thing this machine can say about what it might be missing.\n\n")
+	} else {
+		p("| Writes acknowledged to the client | %d, at %.0f/s |\n", r.Acked, r.WritesPerSecond)
+		p("| Acknowledged writes lost (RPO) | **%d** |\n", r.LostRows)
+		if r.LostRows > 0 && r.WritesPerSecond > 0 {
+			p("| …which at that rate is | **%.1fs** of writes |\n",
+				float64(r.LostRows)/r.WritesPerSecond)
+		}
+		p("| Kill to a write on the new primary (RTO) | **%s** |\n", r.TimeToService.Round(100*time.Millisecond))
+		p("\nRTO above starts at the kill. It does not include noticing the failure or deciding\n")
+		p("to fail over, both of which are a person today.\n\n")
 	}
-	p("| Kill to a write on the new primary (RTO) | **%s** |\n", r.TimeToService.Round(100*time.Millisecond))
-	p("\nRTO above starts at the kill. It does not include noticing the failure or deciding\n")
-	p("to fail over, both of which are a person today.\n\n")
 
 	p("## The configuration that produced those numbers\n\n")
 	p("| | |\n|---|---|\n")
@@ -356,7 +558,36 @@ func (r DrillResult) Report() string {
 	p("\n")
 
 	p("## What may be quoted\n\n")
-	if r.SyncMode {
+	if r.Takeover {
+		// A takeover measured one number and refused to invent the other, so
+		// this section is about the one it has. The local drill's reasoning
+		// about lost rows does not apply: there were no rows to lose here.
+		p("**The time above, and it is the honest kind.** %s is from the primary going\n",
+			r.TimeToService.Round(100*time.Millisecond))
+		p("unreachable to this machine taking a write, so it already contains the part a\n")
+		p("drill on one host leaves out: noticing. It is what a client waited.\n\n")
+		if r.Detection == DetectionAutomatic {
+			p("It also holds without anybody awake, which is the claim worth having: the\n")
+			p("promotion was made by `%s ha watch` after a witness agreed the primary had gone.\n\n", brand.CLI)
+		} else {
+			p("A person noticed and promoted, so the number includes however long that took\n")
+			p("this time and promises nothing about the next. `%s ha watch` with a witness is\n", brand.CLI)
+			p("what makes it repeatable.\n\n")
+		}
+		if r.SyncMode {
+			p("**RPO zero** may be quoted, but not because of this drill: zero-data-loss mode was\n")
+			p("on, so a commit was never acknowledged until this copy had it. That is a property\n")
+			p("of the configuration, and it is the only reason anything about loss can be said\n")
+			p("from here at all.\n\n")
+		} else {
+			p("**Nothing about data loss.** Replication was asynchronous and the writer was on\n")
+			p("the machine that went away. What it acknowledged in its last moments is not\n")
+			p("knowable from here; the archive is the only other place those writes could be,\n")
+			p("and WAL is shipped at least every %ds. `%s ha sync on` is what turns this into a\n",
+				r.ArchiveTimeout, brand.CLI)
+			p("guarantee of zero, at the cost of making every commit wait for the second machine.\n\n")
+		}
+	} else if r.SyncMode {
 		p("**RPO zero**, and it is a property of the configuration rather than of this sample:\n")
 		p("with zero-data-loss mode on, a commit is not acknowledged until the standby has it,\n")
 		p("so there is no window in which an acknowledged write can be lost. The %d above is a\n", r.LostRows)
@@ -390,11 +621,33 @@ func (r DrillResult) Report() string {
 	}
 
 	p("## What this drill did not test\n\n")
-	p("- **Losing a machine.** The standby is a container on this host, sharing its disk and\n")
-	p("  its power. This measures promotion and rerouting, not survival of the host.\n")
-	p("- **Noticing.** Detection and the decision to fail over were manual.\n")
-	p("- **A second site.** There is only one.\n")
-	p("\nThe first and third are what phase 1 of the HA plan is for, and the second phase 3.\n")
+	left := 0
+	if r.Topology != TopologyTwoMachines {
+		left++
+		p("- **Losing a machine.** The standby is a container on this host, sharing its disk and\n")
+		p("  its power. This measures promotion and rerouting, not survival of the host.\n")
+		p("- **A second site.** There is only one.\n")
+	}
+	if r.Detection != DetectionAutomatic {
+		left++
+		p("- **Noticing.** Detection and the decision to fail over were manual.\n")
+	}
+	switch {
+	case left == 0:
+		p("Nothing it set out to. The primary was on another machine, it was not stopped by\n")
+		p("this drill, and nobody decided to fail over: `%s ha watch` noticed and a witness\n", brand.CLI)
+		p("agreed. What is left is the part no drill can test — whether the witness is where\n")
+		p("the clients are, which is why it is a placement an operator chooses rather than a\n")
+		p("default.\n")
+	case r.Topology == TopologyTwoMachines:
+		p("\nAutomatic detection is what phase 3 of the HA plan is for: `%s ha watch` with a\n", brand.CLI)
+		p("witness measures the same failover without anybody awake.\n")
+	case r.Detection == DetectionAutomatic:
+		p("\nSurviving a machine is what phase 1 of the HA plan is for: `%s node join` puts the\n", brand.CLI)
+		p("copy on a second machine, and this same drill then measures a site failure.\n")
+	default:
+		p("\nThe first and third are what phase 1 of the HA plan is for, and the second phase 3.\n")
+	}
 	if len(r.Notes) > 0 {
 		p("\n## Notes\n\n")
 		for _, n := range r.Notes {
@@ -423,4 +676,13 @@ func SaveDrillReport(r DrillResult) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// lsnOrUnknown keeps an empty WAL position from printing as a blank cell in a
+// report somebody is reading to decide something.
+func lsnOrUnknown(lsn string) string {
+	if strings.TrimSpace(lsn) == "" {
+		return "could not be read"
+	}
+	return lsn
 }

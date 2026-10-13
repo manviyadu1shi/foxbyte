@@ -706,7 +706,7 @@ func branchCmd(args []string) {
 // haCmd dispatches `fox ha <subcommand>`.
 func haCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("usage: %s ha <enable|status|failover [--force]|disable|failback|sync on|sync off|drill|repair-roles>\n", brand.CLI)
+		fmt.Printf("usage: %s ha <enable|status|failover [--force]|disable|failback|sync on|sync off|drill|watch|witness|repair-roles>\n", brand.CLI)
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -728,10 +728,62 @@ func haCmd(args []string) {
 		haDrillCmd(args[1:])
 	case "repair-roles":
 		haRepairRolesCmd()
+	case "watch":
+		haWatchCmd(args[1:])
+	case "witness":
+		haWitnessCmd(args[1:])
 	default:
 		fmt.Printf("unknown ha subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
+}
+
+// haWatchCmd is automatic failover: it runs on the standby, watches the
+// primary, and promotes when a witness agrees the primary has gone.
+//
+// Deliberately a command somebody starts rather than something the engine does
+// by itself. An automatic failover is a decision about data, taken while
+// nobody is looking; it should be switched on by a person who has placed a
+// witness and knows where it is.
+func haWatchCmd(args []string) {
+	if hasFlag(args, "-h") || hasFlag(args, "--help") {
+		fmt.Printf("usage: %s ha watch --witness <url> [--token T] [--after 60s] [--every 10s] [--once] [--dry-run]\n\n"+
+			"Runs on a standby that joined a primary elsewhere. Every round it asks two\n"+
+			"questions — can I reach the primary, and can the witness — and promotes only\n"+
+			"when both say no for --after. One opinion is never enough: two machines cannot\n"+
+			"tell a dead primary from one they cannot reach, and promoting on a guess makes\n"+
+			"two primaries whose copies cannot be merged.\n\n"+
+			"The witness goes on a third host, where the clients are. `%s ha witness` runs it.\n"+
+			"--dry-run prints every decision and acts on none, which is how to try this.\n", brand.CLI, brand.CLI)
+		return
+	}
+	must(branch.Watch(branch.WatchOptions{
+		Witness:  optValue(args, "--witness"),
+		Token:    optOr(args, "--token", os.Getenv(brand.EnvName("HA_WITNESS_TOKEN"))),
+		Interval: durFlag(args, "--every", -1),
+		// Negative means "not given", so `--after 0s` can mean what it says:
+		// promote as soon as both observers agree, which is how a drill asks.
+		After:  durFlag(args, "--after", -1),
+		Once:   hasFlag(args, "--once"),
+		DryRun: hasFlag(args, "--dry-run"),
+	}))
+}
+
+// haWitnessCmd runs the witness: the third opinion a promotion needs.
+func haWitnessCmd(args []string) {
+	primary := optValue(args, "--primary")
+	if primary == "" || hasFlag(args, "-h") || hasFlag(args, "--help") {
+		fmt.Printf("usage: %s ha witness --primary <host:port> [--addr :7070] [--token T]\n\n"+
+			"Answers one question, over HTTP: can this host reach that primary? A standby\n"+
+			"running `%s ha watch` promotes only when it and the witness agree that the\n"+
+			"primary has gone.\n\n"+
+			"Run it on a third host — where the clients are, not beside either database.\n"+
+			"A witness that is cut off from the primary alongside the standby will agree\n"+
+			"with it about a primary that is still serving somebody else.\n", brand.CLI, brand.CLI)
+		os.Exit(2)
+	}
+	must(branch.ServeWitness(optOr(args, "--addr", ":7070"), primary,
+		optOr(args, "--token", os.Getenv(brand.EnvName("HA_WITNESS_TOKEN")))))
 }
 
 // haRepairRolesCmd rewrites the role passwords inside the database to the ones
@@ -785,7 +837,8 @@ func haSyncCmd(args []string) {
 // that the standby had received, and the report says so.
 func haDrillCmd(args []string) {
 	if hasFlag(args, "-h") || hasFlag(args, "--help") {
-		fmt.Printf("usage: %s ha drill --yes [--writes N] [--failback]\n\n"+
+		fmt.Printf("usage: %s ha drill --yes [--writes N] [--failback]\n"+
+			"       %s ha drill --takeover [--wait 10m]      (on the surviving machine)\n\n"+
 			"Kills the primary while writes are in flight, promotes the standby through\n"+
 			"`%s ha failover`, and reports what it cost: acknowledged writes lost (RPO) and\n"+
 			"time until the new primary took a write (RTO).\n\n"+
@@ -793,8 +846,23 @@ func haDrillCmd(args []string) {
 			"usually a few seconds. No write the standby had already received is lost.\n\n"+
 			"  --writes N   rows to write, half of them before the kill (default 400)\n"+
 			"  --failback   return to normal running afterwards, and time that too\n\n"+
+			"--takeover measures a failover between machines, run on the standby: it waits\n"+
+			"for the primary elsewhere to stop answering — you stop it, or it fails — and\n"+
+			"then for this machine to serve writes, whether `%s ha watch` promoted it or a\n"+
+			"person did. It stops nothing and promotes nothing itself. RTO then includes\n"+
+			"noticing, which is the number a client experiences; RPO cannot be measured from\n"+
+			"the surviving side and is reported as such rather than guessed at.\n\n"+
 			"The report is written to %s and printed.\n",
-			brand.CLI, brand.CLI, branch.DrillReportDir())
+			brand.CLI, brand.CLI, brand.CLI, brand.CLI, branch.DrillReportDir())
+		return
+	}
+	if hasFlag(args, "--takeover") {
+		// No --yes: this drill breaks nothing. It watches, and what it is
+		// waiting for is an outage somebody else causes.
+		o := branch.DrillOptions{Takeover: true, Wait: durFlag(args, "--wait", 10*time.Minute)}
+		r, err := branch.DrillTakeover(o)
+		reportDrill(r)
+		must(err)
 		return
 	}
 	if !hasFlag(args, "--yes") {
@@ -814,20 +882,26 @@ func haDrillCmd(args []string) {
 	}
 	o := branch.DrillOptions{Writes: writes, Failback: hasFlag(args, "--failback")}
 	r, err := branch.Drill(o)
-	// Printed and saved even when the drill failed part way, because a drill
-	// that went wrong is the most interesting kind and the numbers it reached
-	// are the evidence of what happened. But only once it started: a drill
-	// refused for having no standby has nothing to report, and a document of
-	// zeroes would bury the refusal.
-	if r.Measured() {
-		path, werr := branch.SaveDrillReport(r)
-		fmt.Println()
-		fmt.Print(r.Report())
-		if werr == nil {
-			fmt.Printf("\nSaved to %s\n", path)
-		}
-	}
+	reportDrill(r)
 	must(err)
+}
+
+// reportDrill prints and saves a drill's report.
+//
+// Done even when the drill failed part way, because a drill that went wrong is
+// the most interesting kind and the numbers it reached are the evidence of what
+// happened. But only once it started: a drill refused for having no standby has
+// nothing to report, and a document of zeroes would bury the refusal.
+func reportDrill(r branch.DrillResult) {
+	if !r.Measured() {
+		return
+	}
+	path, werr := branch.SaveDrillReport(r)
+	fmt.Println()
+	fmt.Print(r.Report())
+	if werr == nil {
+		fmt.Printf("\nSaved to %s\n", path)
+	}
 }
 
 // nodeCmd is `fox node`: letting a standby on another machine reach this

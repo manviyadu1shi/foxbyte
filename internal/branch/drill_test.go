@@ -183,3 +183,135 @@ func TestAsyncReportWithNothingLostIsTheDangerousOne(t *testing.T) {
 		t.Error("an asynchronous result is being called a property of the configuration")
 	}
 }
+
+// Phase 6: a report must stop disclaiming what the drill actually did. The old
+// one said "there is only one site" and "detection was manual" in every copy,
+// which is as misleading as claiming a site it did not have — and the second
+// kind of mistake is the only one anybody checks for.
+func TestTheLimitsSectionIsTrueOfTheDrillThatRan(t *testing.T) {
+	t.Run("one host, a person deciding: all three limits stand", func(t *testing.T) {
+		r := asyncResult()
+		r.Topology, r.Detection = TopologyOneHost, DetectionManual
+		got := r.Report()
+		for _, want := range []string{"sharing its disk", "A second site", "were manual", "phase 1", "phase 3"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the report does not say %q", want)
+			}
+		}
+	})
+
+	t.Run("two machines: it no longer claims one site", func(t *testing.T) {
+		r := asyncResult()
+		r.Topology, r.Detection = TopologyTwoMachines, DetectionManual
+		got := r.Report()
+		for _, gone := range []string{"A second site", "sharing its disk"} {
+			if strings.Contains(got, gone) {
+				t.Errorf("the report still says %q of a two-machine drill", gone)
+			}
+		}
+		// And what is left is named, with the phase that closes it.
+		if !strings.Contains(got, "were manual") || !strings.Contains(got, "ha watch") {
+			t.Errorf("the report does not name automatic detection as what is left:\n%s", got)
+		}
+	})
+
+	t.Run("a watcher deciding: it no longer claims detection was manual", func(t *testing.T) {
+		r := asyncResult()
+		r.Topology, r.Detection = TopologyOneHost, DetectionAutomatic
+		got := r.Report()
+		if strings.Contains(got, "were manual") {
+			t.Error("the report says detection was manual of a drill the watcher decided")
+		}
+		if !strings.Contains(got, "node join") {
+			t.Error("the report does not name surviving a machine as what is left")
+		}
+	})
+
+	t.Run("both: nothing it set out to test is left, and that is said once", func(t *testing.T) {
+		r := asyncResult()
+		r.Topology, r.Detection = TopologyTwoMachines, DetectionAutomatic
+		got := r.Report()
+		if !strings.Contains(got, "Nothing it set out to") {
+			t.Errorf("the report hedges a drill with nothing left to hedge:\n%s", got)
+		}
+		// The one thing no drill can test, which is a placement rather than a
+		// mechanism, must still be said.
+		if !strings.Contains(got, "whether the witness is where") {
+			t.Error("the report does not name the part no drill can test")
+		}
+		for _, gone := range []string{"A second site", "were manual", "sharing its disk"} {
+			if strings.Contains(got, gone) {
+				t.Errorf("the report still disclaims %q", gone)
+			}
+		}
+	})
+}
+
+// A takeover drill measures different things, and the one it cannot measure is
+// the one somebody would most like a number for. A zero there would read as a
+// guarantee of no loss, which a surviving machine cannot know.
+func TestTakeoverReportRefusesToGuessRPO(t *testing.T) {
+	r := DrillResult{
+		At: asyncResult().At, Ran: true, Takeover: true,
+		Topology: TopologyTwoMachines, Detection: DetectionAutomatic,
+		Primary: "db1.example.com:5432", TimeToService: 42 * time.Second,
+		LastReceived: "16/B374D848", ArchiveTimeout: archiveTimeoutSeconds,
+		Target: "s3://dr-bucket", TargetRemote: true, PGMajor: "18",
+	}
+	got := r.Report()
+	for _, want := range []string{
+		"not measurable from this side",
+		"db1.example.com:5432",
+		"16/B374D848",
+		"*includes* noticing",
+		"ha watch`, with a witness agreeing",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the takeover report does not say %q\n%s", want, got)
+		}
+	}
+	// It must not print the local drill's framing: nothing was killed here.
+	for _, gone := range []string{"killed with SIGKILL", "Kill to a write", "Acknowledged writes lost (RPO) | **0"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("the takeover report says %q", gone)
+		}
+	}
+	// What may be quoted is the one number it has, and nothing about loss.
+	for _, want := range []string{
+		"the honest kind",
+		"already contains the part a",
+		"Nothing about data loss",
+		"without anybody awake",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the takeover report does not say %q", want)
+		}
+	}
+	// And none of the local drill's reasoning about rows, which had none here.
+	for _, gone := range []string{"keeping up at", "Not the number above", "lost row(s) is what this workload"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("the takeover report reasons about rows it never wrote: %q", gone)
+		}
+	}
+	// A person deciding is reported as such, so the two cases are not confused
+	// by whoever reads the number.
+	r.Detection = DetectionManual
+	m := r.Report()
+	if !strings.Contains(m, "Who noticed | a person") {
+		t.Error("a takeover a person noticed is not reported as such")
+	}
+	if !strings.Contains(m, "promises nothing about the next") {
+		t.Error("a manually noticed takeover is quoted as if it were repeatable")
+	}
+}
+
+// An unread WAL position must not print as a blank cell in a document somebody
+// is reading to decide something.
+func TestAnUnreadableLSNSaysSo(t *testing.T) {
+	if got := lsnOrUnknown("  "); got != "could not be read" {
+		t.Errorf("lsnOrUnknown(blank) = %q", got)
+	}
+	if got := lsnOrUnknown("16/B3"); got != "16/B3" {
+		t.Errorf("lsnOrUnknown passed through as %q", got)
+	}
+}

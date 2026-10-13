@@ -75,6 +75,18 @@ const (
 	EvLicenseRebound   = "license.rebound"
 	EvLicenseLapsed    = "license.lapsed"
 	EvLicenseRemoved   = "license.removed"
+	// Automatic failover: a machine took over, or declined to.
+	//
+	// Both are recorded, and the refusals are the reason this is in the
+	// security log rather than only in a log file. "Nothing promoted it" and
+	// "it decided not to, because somebody else could still reach the primary"
+	// are the same outage to a user and entirely different facts to whoever
+	// reviews the incident — and the second one is a split brain that did not
+	// happen, which is worth being able to prove. This log stays writable on
+	// each node by design (HA plan phase 2 leaves it per-node), so it is
+	// readable on the machine that took over as well as the one that did not.
+	EvFailoverPromoted = "ha.promoted"
+	EvFailoverRefused  = "ha.promotion_refused"
 )
 
 // LicenseKindPrefix is what every licence event kind starts with. The licence
@@ -132,6 +144,28 @@ func (s *Store) Audit(kind, actor, subject, ip, detail string) {
 	if err != nil {
 		log.Printf("security log: could not record %s (%s): %v", kind, subject, err)
 	}
+}
+
+// HasRecentEvent reports whether an event of this kind was recorded at or after
+// t.
+//
+// Added for the drill, which needs to know whether the promotion it is
+// measuring was made by a person or by `ha watch`. Asking the log rather than
+// passing a flag around is deliberate: the watcher is a different process, so
+// there is no flag to pass, and the log is the record an incident review would
+// use to answer the same question.
+//
+// RFC3339Nano, which is how the log stores the time, sorts lexically in the
+// same order as it does chronologically for any one timezone — and every row is
+// written in UTC — so a string comparison is a time comparison here.
+func (s *Store) HasRecentEvent(kind string, t time.Time) bool {
+	if s == nil || s.db == nil {
+		return false
+	}
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM security_events WHERE kind = ? AND at >= ?`,
+		kind, t.UTC().Format(time.RFC3339Nano)).Scan(&n)
+	return err == nil && n > 0
 }
 
 // retryBusy runs fn until it stops reporting SQLITE_BUSY, for a few hundred

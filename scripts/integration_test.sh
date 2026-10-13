@@ -818,6 +818,91 @@ assert_eq "…and the drill left no schema of its own behind" \
 $S ha sync off >/dev/null 2>&1
 $S ha disable >/dev/null 2>&1
 
+# ---- automatic failover, with a witness (HA plan phase 3) -------------------
+#
+# The fence already refuses a promotion while the primary answers. What it
+# cannot do is tell a dead primary from one this machine merely cannot reach:
+# two machines cannot answer that about each other, so somebody else has to
+# look. The witness is that third opinion, and `ha watch` promotes only when
+# both it and this machine agree the primary has gone.
+#
+# Everything here runs on one host, so the "primary elsewhere" is a port
+# nothing is listening on and the join record that names it is written by hand.
+# What is being tested is the decision, which is the part that runs unattended.
+WITPORT=7071
+DEADPORT=59999
+assert_contains "automatic failover refuses to run without a witness" \
+  "$($S ha watch 2>&1 | head -2)" "needs a witness"
+assert_contains "…and on a machine that follows nobody" \
+  "$($S ha watch --witness http://127.0.0.1:$WITPORT/ha/primary 2>&1 | head -2)" "not following a primary"
+# The witness itself: one question, answered truthfully both ways.
+$S ha witness --primary 127.0.0.1:8080 --addr 127.0.0.1:$WITPORT >/tmp/wit-up.log 2>&1 &
+WUP=$!
+$S ha witness --primary 127.0.0.1:$DEADPORT --addr 127.0.0.1:7072 >/tmp/wit-down.log 2>&1 &
+WDOWN=$!
+$S ha witness --primary 127.0.0.1:8080 --addr 127.0.0.1:7073 --token s3cret >/tmp/wit-tok.log 2>&1 &
+WTOK=$!
+sleep 2
+assert_eq "a witness says so when it reaches the primary" \
+  "$(curl -s http://127.0.0.1:$WITPORT/ha/primary | jget reachable)" "True"
+assert_eq "…and when it does not" \
+  "$(curl -s http://127.0.0.1:7072/ha/primary | jget reachable)" "False"
+# 404, not 401: a witness that confirms it is one to anybody who asks is a map
+# of somebody's database cluster.
+assert_eq "a stranger is not told that this is a witness at all" \
+  "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7073/ha/primary)" "404"
+assert_eq "…and the token gets an answer" \
+  "$(curl -s -H 'Authorization: Bearer s3cret' http://127.0.0.1:7073/ha/primary | jget reachable)" "True"
+
+$S ha enable >/dev/null 2>&1; sleep 5
+printf '{"address":"127.0.0.1","port":%s,"role":"db_replica","at":"2026-10-13T00:00:00Z"}\n' "$DEADPORT" > "$HOME/$BRAND_STATE_DIR/node-joined.json"
+# The refusal that matters most: this machine cannot reach the primary, but
+# somebody else can, so this machine is the one that is cut off. Promoting here
+# would make a second primary.
+assert_contains "a watcher refuses while the witness still reaches the primary" \
+  "$($S ha watch --witness http://127.0.0.1:$WITPORT/ha/primary --once --after 0s --dry-run 2>&1 | tail -1)" \
+  "the one that is cut off"
+# And having no second opinion is not agreement.
+assert_contains "…and refuses when the witness cannot be asked at all" \
+  "$($S ha watch --witness http://127.0.0.1:7999/ha/primary --once --after 0s --dry-run 2>&1 | tail -1)" \
+  "A promotion needs two opinions"
+assert_contains "…but promotes when both agree the primary has gone" \
+  "$($S ha watch --witness http://127.0.0.1:7072/ha/primary --once --after 0s --dry-run 2>&1 | tail -1)" \
+  "promoting"
+# A dry run decided all three and changed nothing.
+assert_eq "…and a dry run promoted nothing" "$(cat "$HOME/$BRAND_STATE_DIR/primary" 2>/dev/null)" "main"
+
+# ---- a site drill, measured from the surviving machine (phase 6) -----------
+#
+# A local drill kills the primary beside it. On a machine that follows a primary
+# elsewhere there is nothing here to kill, so it is refused and names the drill
+# that does apply -- which waits for the other machine to go, promotes nothing
+# itself, and measures what a client waited.
+assert_contains "a local drill is refused on a machine that follows a primary elsewhere" \
+  "$($S ha drill --yes --writes 10 2>&1 | head -2)" "ha drill --takeover"
+# For real now: the watcher promotes, the drill measures.
+( sleep 6; "$S" ha watch --witness http://127.0.0.1:7072/ha/primary --after 0s >/tmp/watch-real.log 2>&1 ) &
+TD=/tmp/takeover.out
+timeout 180 $S ha drill --takeover --wait 90s >"$TD" 2>&1
+assert_eq "the takeover drill runs and exits 0" "$?" "0"
+assert_contains "…measuring the time a client waited, noticing included" "$(cat "$TD")" "includes* noticing"
+assert_contains "…refusing to guess the data loss it cannot see from this side" \
+  "$(cat "$TD")" "not measurable from this side"
+assert_contains "…and crediting the watcher rather than a person" "$(cat "$TD")" "with a witness agreeing"
+# The report stops disclaiming what this drill actually did, which is the whole
+# of phase 6: it used to say "there is only one site" in every copy.
+assert_contains "…and no longer disclaims a second site it had" "$(cat "$TD")" "Nothing it set out to"
+assert_eq "…nor claims detection was manual" "$(grep -c 'were manual' "$TD")" "0"
+assert_eq "the promotion is in the hash-chained security log" \
+  "$($S audit 2>/dev/null | grep -c 'ha.promoted')" "1"
+kill "$WUP" "$WDOWN" "$WTOK" 2>/dev/null
+rm -f "$HOME/$BRAND_STATE_DIR/node-joined.json"
+$S ha failback >/dev/null 2>&1; sleep 2
+$S ha disable >/dev/null 2>&1
+assert_eq "the install is back on main with no standby" \
+  "$(cat "$HOME/$BRAND_STATE_DIR/primary" 2>/dev/null)|$(sudo docker ps -aq --filter 'name=^pg-standby$' | wc -l | tr -d ' ')" "main|0"
+# ---- end phases 3 and 6 ----------------------------------------------------
+
 echo "### 7. regression: reaper never suspends the standby"
 $S ha enable >/dev/null 2>&1; sleep 2
 $S branch create rgn >/dev/null 2>&1

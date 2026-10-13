@@ -143,6 +143,14 @@ func optValue(args []string, flag string) string {
 	return ""
 }
 
+// optOr is optValue with a fallback, for a flag whose default is not "".
+func optOr(args []string, flag, def string) string {
+	if v := optValue(args, flag); v != "" {
+		return v
+	}
+	return def
+}
+
 // firstPositional returns the first argument that is neither a flag nor the value
 // of one of valueFlags.
 func firstPositional(args []string, valueFlags ...string) string {
