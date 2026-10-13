@@ -405,6 +405,14 @@ func replicationAccessLine(ha branch.HAState, wideOpen func(string) bool) checkL
 	if !ha.Enabled {
 		return ok("replication", "nothing may copy this database: no standby, and no rule admitting one")
 	}
+	if e, published := branch.CurrentExposure(); published {
+		// Postgres on a network is the one thing the engine otherwise refuses
+		// to do, so an install that does it should say so on every check —
+		// not as a fault, but because an operator should never discover it.
+		return ok("replication", fmt.Sprintf("%s, and %s can copy it from there and read none of it",
+			branch.DescribeExposure(), branch.ReplicationRole)+
+			exposureCaveat(e))
+	}
 	if wideOpen(branch.PrimaryContainer()) {
 		return warn("replication",
 			"the primary admits a replication connection from any role at any address — a rule an "+
@@ -414,6 +422,15 @@ func replicationAccessLine(ha branch.HAState, wideOpen func(string) bool) checkL
 	}
 	return ok("replication", fmt.Sprintf("only %s may copy it, from this install's own network, and it "+
 		"can read none of it", branch.ReplicationRole))
+}
+
+// exposureCaveat adds the one thing worth saying about a published primary that
+// the summary does not: a range admits every machine on it.
+func exposureCaveat(e branch.NodeExposure) string {
+	if strings.HasSuffix(e.Peer, "/32") || strings.HasSuffix(e.Peer, "/128") {
+		return ""
+	}
+	return " — note that " + e.Peer + " is a range, so any machine on it may try"
 }
 
 // checkDurability reports what a commit means, and shouts when commits cannot

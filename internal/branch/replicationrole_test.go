@@ -34,7 +34,7 @@ func TestReplicationRoleIsNarrow(t *testing.T) {
 // everyone it names. Leaving the old one below the narrow one would look like a
 // narrowing and be none.
 func TestTheWideRuleIsRemovedNotOutranked(t *testing.T) {
-	sh := hbaScript()
+	sh := hbaScript("")
 	if !strings.Contains(sh, "sed -i") || !strings.Contains(sh, "/d") {
 		t.Errorf("the wide rule is not deleted:\n%s", sh)
 	}
@@ -120,4 +120,60 @@ func mustMatch(ere, line string) bool {
 		panic(err)
 	}
 	return re.MatchString(line)
+}
+
+// The peer rule: the whole of "TLS on replication traffic", and the whole of
+// "from that machine only".
+func TestPeerRuleRequiresTLSAndNamesOneMachine(t *testing.T) {
+	line := peerHBALine("192.168.105.3/32")
+	f := strings.Fields(line)
+	if len(f) != 5 {
+		t.Fatalf("pg_hba rules have five fields: %q", line)
+	}
+	// hostssl, not host. `host` matches a plaintext connection too, so a
+	// standby that failed to negotiate TLS would still be admitted and would
+	// still send its password.
+	if f[0] != "hostssl" {
+		t.Errorf("the peer rule is %q, which would admit a plaintext connection", f[0])
+	}
+	if f[1] != "replication" || f[2] != ReplicationRole {
+		t.Errorf("the peer rule does not admit the replication role alone: %q", line)
+	}
+	if f[3] != "192.168.105.3/32" {
+		t.Errorf("the peer rule admits %q rather than the machine named", f[3])
+	}
+	if f[4] != "scram-sha-256" {
+		t.Errorf("the peer rule does not require a password: %q", line)
+	}
+	// Nothing published, nothing admitted.
+	if peerHBALine("") != "" || peerHBALine("   ") != "" {
+		t.Error("an install that publishes nothing still got a peer rule")
+	}
+}
+
+// An install that publishes nothing has the pg_hba it had before any of this
+// existed, and one that does gets exactly one peer rule however many times the
+// command runs.
+func TestTheScriptReplacesPeerRulesRatherThanStacking(t *testing.T) {
+	bare := hbaScript("")
+	// It must not *write* one. It does still mention hostssl, in the pattern
+	// that deletes a stale rule -- which is the point: an install that stops
+	// publishing must stop admitting the peer it used to.
+	if strings.Contains(bare, "echo 'hostssl") {
+		t.Errorf("an unpublished install is given a peer rule:\n%s", bare)
+	}
+	if !strings.Contains(bare, "sed -i '/^hostssl") {
+		t.Errorf("stale peer rules are never removed:\n%s", bare)
+	}
+	withPeer := hbaScript("10.0.0.5/32")
+	if strings.Count(withPeer, "hostssl replication "+ReplicationRole) != 1 {
+		t.Errorf("expected exactly one peer rule to be written:\n%s", withPeer)
+	}
+	// The deletion must come before the append, or running it twice leaves the
+	// rule it just wrote deleted.
+	del := strings.Index(withPeer, "sed -i '/^hostssl")
+	add := strings.Index(withPeer, "echo 'hostssl")
+	if del < 0 || add < 0 || del > add {
+		t.Errorf("the stale-rule deletion does not precede the append:\n%s", withPeer)
+	}
 }

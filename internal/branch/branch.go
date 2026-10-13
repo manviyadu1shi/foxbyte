@@ -258,9 +258,21 @@ func startContainer(name string, primary bool) error {
 	if primary {
 		args = append(args, walgEnv()...)
 		args = append(args, "-e", "WALG_COMPRESSION_METHOD=lz4")
+		// A primary somebody published for a standby on another machine: the
+		// host port, bound to the one address rather than every interface, and
+		// the certificate it serves. Both are fixed when a container is made,
+		// which is why `node expose` restarts main. Off on every install that
+		// has not asked (node.go).
+		if e, ok := CurrentExposure(); ok {
+			args = append(args, exposePublish(e, true)...)
+			args = append(args, exposeMount(true)...)
+		}
 	}
 	args = append(args, img)
 	args = append(args, postgresArgs(primary, imageMajor(img))...)
+	if primary {
+		args = append(args, exposeArgs(Exposed())...)
+	}
 	// `docker run -d` answers with the container id, which was the last thing
 	// `fox branch create` printed — a 64-character hash where a person wanted the
 	// branch's name and how to reach it. The id is kept for a failure, where it is

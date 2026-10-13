@@ -138,6 +138,63 @@ probably acceptable, but it is a decision rather than a detail: it puts a
 write-on-a-timer into the primary's WAL, and the WAL is what replication and
 the archive carry.
 
+#### Measured before phase 2, and it changes the recommendation
+
+The paragraph above worried about the WAL. The larger problem is availability,
+and it inverts the purpose of the phase.
+
+**Authentication does not depend on the database engine today, and the package
+boundary enforces it.** `internal/auth` imports exactly one package of ours:
+`internal/brand`. Not `internal/branch`. So signing in, verifying an API key
+and appending to the security log all work while `main` is down — by
+construction, not by luck.
+
+**The gateway reads that store on every client connection, before any branch is
+touched** ([proxy.go:300](../internal/proxy/proxy.go)). What each kind of
+credential needs today:
+
+| Credential | The auth store | `main` |
+|---|---|---|
+| a branch-scoped key — an agent on its own branch | yes | **no**: the ACL is skipped entirely for scoped keys |
+| an account key | yes | yes, to resolve admin (`branch.IsAdmin("main")`, cached 30s) |
+| the console sign-in | yes | **no** |
+
+So putting the store in `main` would mean:
+
+- **nobody can sign in while `main` is unavailable** — which is exactly the
+  window this phase exists to protect. Phase 2's own stated unlock is "logins
+  and credentials survive a failover"; storing them in the thing that fails over
+  is the one arrangement guaranteeing they do not;
+- **an agent could not reach its own healthy branch** because `main` was down.
+  A branch-scoped key needs no `main` today, and this would add that dependency
+  to the product's headline use case;
+- and the security log — append-only and hash-chained — would be unwritable in
+  the same window, so the refusals happening *during* an incident are the ones
+  that would not be recorded.
+
+**Recommendation: not `main`.** A store of its own, which keeps the property the
+package boundary already gives us. Where it lives is still open — a small
+Postgres that is itself replicated, the monitor node phase 3 introduces, or a
+consensus store with the operational cost §2 of this review already named — but
+"main itself" should be struck from the options rather than carried forward as
+the default because the original document suggested it.
+
+**And the move is worth nothing until phase 1 exists.** "A store every node can
+reach" has no content on one node: a single-VM failover keeps the same `~/.fox`
+and the same SQLite file, so logins already survive it. Unlike phases 4, 5 and
+6, none of this phase pays off before there is a second machine — which is why
+it should follow phase 1 rather than precede it, and why the work was not
+started here.
+
+What the move will involve, measured rather than guessed: ten tables
+(`users`, `sessions`, `api_keys`, `oauth_identities`, `branch_owners`,
+`change_requests`, `pipelines`, `pipeline_targets`, `pipeline_runs`,
+`realtime_activity`, and the hash-chained `security_events`), 3,861 lines in
+`internal/auth`, and 31 places holding a `*auth.Store`. The SQL itself is nearly
+portable — three `AUTOINCREMENT` declarations are the only SQLite-specific
+constructs — so the cost is in the seam and the migration, not in rewriting
+queries.
+
 ### 3.3 Replication slots do not survive promotion — but on PG 18 they can
 
 This is the gap worth acting on, and it only exists because the change feed now
@@ -201,15 +258,16 @@ call under a ten-minute deadline. `fox backup target show` does that.
 bucket for an operator. The check now tells every install that its backups are
 one disk failure from gone; acting on it is theirs.
 
-### Phase 1 — a standby on another machine (large) — **started: the replication role**
+### Phase 1 — a standby on another machine (large) — **started: the role, TLS and exposure**
 
 | | |
 |---|---|
 | A dedicated replication role rather than widening `allowReplication` | **done** |
-| TLS on replication traffic | **not started** — Postgres has no TLS at all today, so this is a new subsystem, not a setting |
-| `fox node join <primary>` — a second install builds its standby over the network | **not started** |
-| Distribute the install secret and signing keys to each node | **not started** — a decision about key distribution before it is a function |
-| `standbyRunArgs` grows a remote primary address | **not started** |
+| TLS on replication traffic | **done** — `fox node expose`, with a per-install CA |
+| Publishing Postgres off the machine at all | **done** — opt-in, TLS-required, one address, one role, one peer |
+| `fox node join <primary>` — a second install builds its standby over the network | **next** |
+| Distribute the install secret and signing keys to each node | **decided and narrowed** — see the join token below |
+| `standbyRunArgs` grows a remote primary address | **next**, with `node join` |
 
 Unlocks: survives losing a machine. Everything after this depends on it.
 
@@ -265,41 +323,114 @@ rewrite it, and the only thing that does is another `ha enable`. An install
 whose HA was enabled by an older version keeps the wide rule, and nothing would
 have said so.
 
+#### `fox node expose` — TLS, and putting Postgres on a network at all
+
+Everything else in the engine keeps Postgres off every network: `startContainer`
+publishes no host port, and the comment there says why — a direct connection
+would bypass the gateway, its API key, TLS and ledger attribution. This is the
+one command that reverses it, and it reverses it narrowly: only when asked,
+only on the address given, only over TLS with a certificate the standby
+verifies, only for `db_replica`, and only from the one peer address named.
+
+`internal/tlsutil` already exists and is deliberately **not** reused. That
+package says of itself that the point "is not a trusted chain — it is encryption
+on the wire", which is right for a browser accepting a self-signed certificate
+once. It is wrong for replication: a standby that encrypts without verifying has
+an encrypted channel to whoever answered, and what it sends down that channel is
+a credential that can copy the database. So there is a small CA per install,
+kept on the primary, issuing a certificate that names the address a standby
+dials.
+
+Measured between two machines (two VMs on a shared network) before any of it
+was written, and again after:
+
+| From the other machine | |
+|---|---|
+| `db_replica`, TLS, with the CA | `IDENTIFY_SYSTEM` answers |
+| `db_replica`, **no TLS** | `no pg_hba.conf entry` |
+| the **superuser**, TLS, from the permitted address | `no pg_hba.conf entry` |
+| `verify-full` without the CA | the client refuses to trust the server |
+| a real `pg_basebackup` over TLS | 47 MB copied, rc=0 |
+
+Three things that environment caught which reading could not.
+
+**A silent TLS bypass that nearly existed.** A published install carries two
+rules: `host … samenet` for a standby on this machine and `hostssl … peer/32`
+for the remote one. `host` matches plaintext. If docker's port publishing had
+made a remote connection appear to come from the docker gateway, it would have
+matched the *samenet* rule and TLS would have been optional while looking
+mandatory. Docker preserves the source address, so it is genuinely refused —
+but that was luck rather than design, and it is a test now.
+
+**The private key must not live in `PGDATA`.** The first instinct was to put it
+there: already bind-mounted, no new mount, and `ssl_cert_file` is a sighup
+setting so TLS would need no restart at all. `pg_basebackup` copies `PGDATA`, so
+every standby that joined would have been handed the primary's private key. The
+certificates live in a read-only mount instead.
+
+**Only the port needs a restart.** `ssl`, `ssl_cert_file` and `ssl_key_file` are
+all sighup — checked against a live server — so the restart the command performs
+is for the published port alone, and it says "connections drop for a few
+seconds" rather than pretending otherwise.
+
+#### The join token, which settles the third bullet
+
+The plan asked to "distribute the install secret and signing keys to each node,
+since every role password is derived from the secret". That is exactly what it
+should **not** do. Deriving every role password from one secret means a node
+holding that secret can derive the *superuser's*, so a standby would arrive
+holding the credential that owns the database — which is the thing the previous
+commit took away from replication in the first place.
+
+So the token carries the CA certificate, the address and port, and
+`db_replica`'s password. Nothing else. A test asserts the install secret does
+not appear in it.
+
+The cost, written down rather than discovered later: the other machine cannot
+derive that password if it is ever rotated, so a rotation means re-issuing the
+token. That is the right side of the trade — a rotation is rare, and a superuser
+credential on a second machine is forever.
+
 #### What the rest needs, and why it is not here
 
 Two things, and they are not effort.
 
-**Two hosts that can reach each other.** The defining property of this phase is
-another machine, and the development environment has one VM. A second one is
-possible; a second one *that the first can reach* needs either `socket_vmnet`
-installed on the host or the VM's port forwarding rebound to a non-loopback
-address — a change to the developer's own machine, not to this repository. Until
-that exists, `node join`, the remote primary address and secret distribution
-can be written but not run, and every phase in this plan that went well went
-well because the mechanics were measured in a VM before the code was written.
-Three of the traps in phases 4 and 5 — a fatal setting on PostgreSQL 16, a
-backup that deleted its own data directory, a promotion that made the database
-unwritable — were found that way and by nothing else.
+**`fox node join` is next**, and it is the one that makes the phase's promise
+true. What remains is the node-2 side: take a token, build a standby from the
+primary over the network, and run it — which means `standbyRunArgs` growing a
+remote primary address and a mount for the CA certificate, since
+`primary_conninfo` carries `sslrootcert` as an **in-container** path (measured).
 
-**A decision about exposure.** A remote standby means Postgres listening beyond
-loopback for the first time. Today no engine port is published outside the VM
-on purpose: `internal/branch/branch.go` says a direct connection would bypass
-the gateway, its API key, TLS and ledger attribution. Publishing 5432 to a
-network is a deliberate reversal of that, and it is the reason TLS belongs in
-the same change rather than after it.
+**What two VMs still do not prove.** They share a kernel, a disk and a power
+supply. This proves the networking, the credentials and the TLS path; it does
+not prove surviving the loss of a host, and the drill report's "what this did
+not test" section goes on saying so.
 
-TLS is also where key distribution stops being separable: a certificate the
-standby can verify has to reach the standby, which is the same problem as
-getting it the install secret. Designing the certificate story before deciding
-how secrets travel between nodes would mean building it twice.
-
-### Phase 2 — shared state (medium)
+### Phase 2 — shared state (medium) — **investigated, not started; see 3.2**
 
 Accounts, API keys, change requests, pipelines and the realtime meter move out
 of per-node SQLite into a store every node can reach. Decide 3.2 here.
 
 Unlocks: logins and credentials survive a failover — without this, a failover
 leaves nobody able to sign in.
+
+**The investigation this phase asked for is done and is written up in 3.2
+above.** Two findings:
+
+1. **"main itself" should be struck from the options.** Authentication has no
+   dependency on the database engine today — `internal/auth` imports only
+   `internal/brand` — and the gateway reads the store on every connection
+   before any branch is touched. Storing accounts in `main` would make signing
+   in impossible while `main` is unavailable, which is the window this phase
+   exists to protect, and would stop an agent reaching its own healthy branch.
+2. **Nothing here pays off before phase 1.** On one node a failover keeps the
+   same `~/.fox` and the same SQLite file, so logins already survive it. This
+   phase is the only one in the plan with no single-host value, so it follows
+   phase 1 rather than preceding it.
+
+Still to decide: *which* store, now that `main` is out. A small Postgres that is
+itself replicated, the monitor node phase 3 introduces, or a consensus store —
+each with the operational cost §2 of this review named for a two-server shop.
 
 ### Phase 3 — automatic failover with fencing (large)
 
@@ -679,6 +810,7 @@ pitch is a tamper-evident record. Route B is a different product.
    evaluation licences already issued are site licences (empty fingerprint),
    so they would survive a failover; a customer licence issued the default way
    would not.
-2. **Where shared state lives** (3.2) — main itself, or a separate store.
+2. **Where shared state lives** (3.2) — *narrowed*: not main itself, for the
+   availability reason measured in 3.2. Which separate store is still open.
 3. **Failover manager** — `pg_auto_failover` or Patroni.
 4. **Whether the customer supplies the virtual IP**, or we ship something.

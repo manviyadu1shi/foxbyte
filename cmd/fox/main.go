@@ -417,6 +417,8 @@ func main() {
 		must(realtimeCmd(os.Args[2:]))
 	case "ha":
 		haCmd(os.Args[2:])
+	case "node":
+		nodeCmd(os.Args[2:])
 	case "user":
 		userCmd(os.Args[2:])
 	case "setup-token":
@@ -802,6 +804,66 @@ func haDrillCmd(args []string) {
 		}
 	}
 	must(err)
+}
+
+// nodeCmd is `fox node`: letting a standby on another machine reach this
+// primary, which is the one thing in the engine that puts Postgres on a
+// network. Everything else keeps it off one on purpose.
+func nodeCmd(args []string) {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fmt.Printf("usage: %s node <expose --address A --peer B [--port N] | unexpose | status | token>\n\n"+
+			"expose     publish this primary for a standby on another machine: TLS with a\n"+
+			"           certificate that names --address, admitting only the %s role and\n"+
+			"           only from --peer. Restarts main, because a published port is fixed\n"+
+			"           when the container is made.\n"+
+			"unexpose   take it back off the network.\n"+
+			"status     what is published, if anything.\n"+
+			"token      print the join token again, for the other machine.\n",
+			brand.CLI, branch.ReplicationRole)
+		return
+	}
+	switch args[0] {
+	case "expose":
+		addr, peer := optValue(args, "--address"), optValue(args, "--peer")
+		if addr == "" || peer == "" {
+			fmt.Printf("usage: %s node expose --address <this machine> --peer <the standby's address>\n\n"+
+				"--address is what the standby will dial, and what the certificate names.\n"+
+				"--peer is the standby's address; only that machine is admitted.\n", brand.CLI)
+			os.Exit(2)
+		}
+		port := 0
+		if v := optValue(args, "--port"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 || n > 65535 {
+				fmt.Fprintf(os.Stderr, "error: --port %q is not a port\n", v)
+				os.Exit(2)
+			}
+			port = n
+		}
+		if !hasFlag(args, "--yes") {
+			fmt.Printf("This publishes Postgres on %s so a standby on %s can copy it.\n\n"+
+				"  · over TLS only, with a certificate naming %s\n"+
+				"  · as %s, which can copy the database and read none of it\n"+
+				"  · from %s only\n\n"+
+				"main restarts, so connections drop for a few seconds. Nothing else is published:\n"+
+				"clients still reach branches through the gateway.\n\n"+
+				"Run it with --yes when you are ready.\n",
+				addr, peer, addr, branch.ReplicationRole, peer)
+			os.Exit(2)
+		}
+		must(branch.NodeExpose(addr, peer, port))
+	case "unexpose":
+		must(branch.NodeUnexpose())
+	case "status":
+		fmt.Println(branch.DescribeExposure())
+	case "token":
+		tok, err := branch.JoinToken()
+		must(err)
+		fmt.Println(tok)
+	default:
+		fmt.Printf("unknown node subcommand: %s\n", args[0])
+		os.Exit(2)
+	}
 }
 
 func must(err error) {
