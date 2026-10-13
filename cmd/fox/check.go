@@ -5,6 +5,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -51,39 +52,145 @@ func fail(name, detail, fix string) checkLine {
 	return checkLine{name: name, detail: detail, fix: fix, state: stateFail}
 }
 
+// a check: the lines it produces, and the name to put on a line if it does not
+// produce them in time.
+type check struct {
+	name string
+	run  func() []checkLine
+}
+
+func one(name string, f func() checkLine) check {
+	return check{name, func() []checkLine { return []checkLine{f()} }}
+}
+
+func group(name string, f func() []checkLine) check { return check{name, f} }
+
+// checks, in the order they are reported: roughly outside-in, from what this
+// binary is to what is in the database.
+func checks() []check {
+	return []check{
+		one("version", checkVersion),
+		one("edition", checkEdition),
+		one("licence", checkLicense),
+		one("web console", checkConsoleEmbedded),
+		one("storage", checkStorage),
+		one("main", checkMain),
+		group("servers", checkServers),
+		group("ports", checkPorts),
+		one("API over TLS", checkAPI),
+		one("API is closed", checkAPIClosed),
+		one("blackbox", checkBlackbox),
+		one("blackbox anchors", checkAnchors),
+		one("change feed", checkRealtime),
+		one("durability", checkDurability),
+		one("replication", checkReplicationAccess),
+		one("backup target", checkBackupTarget),
+		one("backups", checkBackups),
+		one("restore proven", checkRestore),
+		one("sample data", checkSampleData),
+	}
+}
+
+// EnvCheckTimeout tunes how long one check may take (a duration such as "30s"),
+// or waits for ever with "off".
+const EnvCheckTimeout = "CHECK_TIMEOUT"
+
+// checkTimeout is how long to wait for one check. Seconds, not minutes: this
+// command is run to find out why an install is not working, so every line has
+// to arrive even when the thing behind it never answers.
+func checkTimeout() time.Duration {
+	v := strings.ToLower(strings.TrimSpace(brand.Getenv(EnvCheckTimeout)))
+	switch v {
+	case "":
+		return 10 * time.Second
+	case "off", "0", "false", "no":
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 10 * time.Second
+	}
+	return d
+}
+
+// probeBudget is how long a check's own shell-outs get, given the deadline on
+// the line they belong to: half of it.
+//
+// The two deadlines have to nest rather than race. Whichever expires first is
+// the one that gets to say what happened — and the inner one is the only one
+// that can tidy up after itself: a check abandoned by the outer deadline leaves
+// whatever it started running, which is how a `check` that was given up on left
+// a Postgres container up behind it. With deadlines switched off, nothing is
+// imposed here either.
+func probeBudget(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return d / 2
+}
+
+// runCheck is c, given at most d to answer.
+//
+// The check runs in a goroutine and is abandoned rather than cancelled: it is
+// a few shell-outs deep by then, each with its own deadline, and this process
+// is about to exit anyway. What matters is that the report does not wait for
+// it — a check that hangs now costs its own line and nothing else.
+func runCheck(c check, d time.Duration) []checkLine {
+	if d <= 0 {
+		return c.run()
+	}
+	done := make(chan []checkLine, 1)
+	go func() { done <- c.run() }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case ls := <-done:
+		return ls
+	case <-timer.C:
+		// Deliberately a warning, not a failure: nothing was established either
+		// way, and a `check` that exited 1 on a slow machine would be the wrong
+		// lesson to teach anybody scripting it.
+		return []checkLine{warn(c.name,
+			fmt.Sprintf("could not be determined in %s — this says nothing about it either way", d),
+			fmt.Sprintf("%s=1m %s check   — if this install is slow rather than stuck",
+				brand.EnvName(EnvCheckTimeout), brand.CLI))}
+	}
+}
+
+// report runs each check in turn and writes its lines to w as they resolve,
+// returning how many failed and how many warned.
+//
+// Each line is written the moment it is known. They used to be collected into
+// one slice and printed after the last check returned, which meant a single
+// check that did not return held back the whole report: the twenty lines that
+// had already answered — including the ones naming what was wrong — stayed
+// invisible behind it, and `check` looked like a command that does nothing at
+// all. A hang now costs the line it is on.
+func report(w io.Writer, cs []check, d time.Duration) (failed, warned int) {
+	for _, c := range cs {
+		for _, l := range runCheck(c, d) {
+			mark := "ok  "
+			switch l.state {
+			case stateWarn:
+				mark, warned = "warn", warned+1
+			case stateFail:
+				mark, failed = "FAIL", failed+1
+			}
+			fmt.Fprintf(w, "%s  %-18s %s\n", mark, l.name, l.detail)
+			if l.fix != "" {
+				fmt.Fprintf(w, "      → %s\n", l.fix)
+			}
+		}
+	}
+	return failed, warned
+}
+
 func checkCmd(args []string) {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Printf("usage: %s check\n\nChecks this install and says what to do about anything wrong.\n", brand.CLI)
 		return
 	}
-	lines := []checkLine{
-		checkVersion(),
-		checkEdition(),
-		checkLicense(),
-		checkConsoleEmbedded(),
-		checkStorage(),
-		checkMain(),
-	}
-	lines = append(lines, checkServers()...)
-	lines = append(lines, checkPorts()...)
-	lines = append(lines, checkAPI(), checkAPIClosed(), checkBlackbox(), checkAnchors(), checkRealtime(),
-		checkDurability(), checkReplicationAccess(), checkBackupTarget(), checkBackups(),
-		checkRestore(), checkSampleData())
-
-	failed, warned := 0, 0
-	for _, l := range lines {
-		mark := "ok  "
-		switch l.state {
-		case stateWarn:
-			mark, warned = "warn", warned+1
-		case stateFail:
-			mark, failed = "FAIL", failed+1
-		}
-		fmt.Printf("%s  %-18s %s\n", mark, l.name, l.detail)
-		if l.fix != "" {
-			fmt.Printf("      → %s\n", l.fix)
-		}
-	}
+	failed, warned := report(os.Stdout, checks(), checkTimeout())
 	fmt.Println()
 	switch {
 	case failed > 0:
@@ -537,17 +644,37 @@ func backupTargetLine(t branch.Target, err error) checkLine {
 			fmt.Sprintf("%s backup target set s3://bucket --endpoint <https-url> --access-key <key>", brand.CLI))
 	}
 	// Whether that bucket has Object Lock is the next question and is not asked
-	// here: answering it means starting a container and reaching the bucket
-	// over the network, under a ten-minute deadline. `check` is run often and
-	// should stay quick, and a hang in it would make every other line
-	// untrustworthy. `backup target show` reaches the bucket and reports both
-	// its reachability and its retention.
+	// here: answering it means starting a container and reaching the bucket over
+	// the network, under a ten-minute deadline. `check` is run often and should
+	// stay quick. A hang in it no longer makes every other line untrustworthy —
+	// each check has a deadline and the lines print as they resolve — but a
+	// line that costs a container and a network round trip is still the wrong
+	// price for a question `backup target show` answers on demand, along with
+	// the bucket's reachability.
 	return ok("backup target", t.Describe())
 }
 
+// How current the backups are — the one line here that has to reach object
+// storage to answer, and so the one that used to hang.
+//
+// With the install down and the backups in the local object store, there is
+// nothing to list and no point waiting to discover that; with a remote bucket
+// the listing is given seconds, not minutes. Either way a listing that cannot
+// be made is reported as a listing that cannot be made. It is not reported as
+// "no base backup yet": that sentence sends somebody to take a backup when they
+// may already have a hundred, behind a store that is merely unreachable.
 func checkBackups() checkLine {
-	h := branch.CurrentBackupHealth()
+	h := branch.CurrentBackupHealthProbe(probeBudget(checkTimeout()))
 	switch {
+	case h.Unknown:
+		// The way out differs by where the backups are: a local store is this
+		// install being down, a bucket that will not answer is credentials or a
+		// network, and `backup list` is where its own error is printed in full.
+		fix := fmt.Sprintf("%s start   (then `%s backup list`)", brand.CLI, brand.CLI)
+		if h.Remote {
+			fix = fmt.Sprintf("%s backup list   — prints the store's own error in full", brand.CLI)
+		}
+		return warn("backups", "could not be listed: "+h.Err, fix)
 	case h.Newest == "":
 		return warn("backups", "no base backup yet, so there is nothing to restore to",
 			fmt.Sprintf("%s backup create", brand.CLI))
@@ -585,7 +712,14 @@ func checkSampleData() checkLine {
 	if branch.DemoOff() {
 		return ok("sample data", "switched off ("+brand.EnvName("NO_DEMO")+")")
 	}
-	n := branch.TableCount("main")
+	n, asked := branch.TableCountOK("main")
+	if !asked {
+		// Not "main has no tables": a stopped main answers the same way as an
+		// empty one, and seeding a database that is not running is not the
+		// thing to go and do about it.
+		return warn("sample data", "main could not be asked what it holds",
+			fmt.Sprintf("%s start", brand.CLI))
+	}
 	if n == 0 {
 		return warn("sample data", "main has no tables", fmt.Sprintf("%s demo seed main", brand.CLI))
 	}

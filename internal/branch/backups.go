@@ -186,8 +186,12 @@ func backupRetain() int {
 
 // NewestBackup is the finish time of the newest base backup of this cluster
 // (zero when there is none).
-func NewestBackup() (time.Time, error) {
-	bs, err := Backups()
+func NewestBackup() (time.Time, error) { return newestBackupWithin(execQuick) }
+
+// newestBackupWithin is NewestBackup bounded by d, for a caller that would
+// rather have no answer than wait for one.
+func newestBackupWithin(d time.Duration) (time.Time, error) {
+	bs, err := backupsWithin(d)
 	if err != nil || len(bs) == 0 {
 		return time.Time{}, err
 	}
@@ -203,18 +207,64 @@ type BackupHealth struct {
 	Target   string `json:"target"`
 	Remote   bool   `json:"remote"`
 	Schedule string `json:"schedule"`
+	// Unknown separates "there are no backups" from "nobody could be asked".
+	// They read the same in every earlier version of this struct — an empty
+	// Newest — and they are opposite findings: one is a fresh install with
+	// nothing to restore, the other is an install whose backups may be perfectly
+	// fine behind a store that cannot be reached. Why is in Err.
+	Unknown bool   `json:"unknown,omitempty"`
+	Err     string `json:"error,omitempty"`
 }
 
 // CurrentBackupHealth reads the newest backup and judges it.
-func CurrentBackupHealth() BackupHealth {
-	t := target()
+func CurrentBackupHealth() BackupHealth { return backupHealthWithin(execQuick) }
+
+// CurrentBackupHealthProbe is the same judgement for a caller that must answer
+// quickly whatever the state of the install — `fox check`. It gives the listing
+// d (the probe tier when that is not positive) rather than the minutes a
+// command doing real work is allowed, and says so when that was not enough.
+func CurrentBackupHealthProbe(d time.Duration) BackupHealth {
+	if d <= 0 {
+		d = execProbe
+	}
+	return backupHealthWithin(d)
+}
+
+// backupHealthWithin judges the newest backup, giving the listing at most d.
+func backupHealthWithin(d time.Duration) BackupHealth {
+	return backupHealth(target(), objStoreRunning, func() (time.Time, error) { return newestBackupWithin(d) })
+}
+
+// backupHealth is the judgement, given the target, a way to ask whether the
+// local object store is up, and a way to read the newest backup. Functions
+// rather than values so neither question is put unless it decides the answer —
+// and so this is testable without a pool, which the state behind it is not.
+func backupHealth(t Target, localStoreUp func() bool, newestBackup func() (time.Time, error)) BackupHealth {
 	h := BackupHealth{Target: t.Describe(), Remote: t.Remote(), Schedule: "off"}
 	iv := backupInterval()
 	if iv > 0 {
 		h.Schedule = "every " + iv.String()
 	}
-	newest, err := NewestBackup()
-	if err != nil || newest.IsZero() {
+	// The local object store is a container of this install's own. With it gone
+	// the bucket is not there to answer, and asking anyway spends the whole
+	// deadline discovering that — so the reason is reported instead of waited
+	// for. A remote target is still asked: answering with the stack down is the
+	// point of having one.
+	if !t.Remote() && !localStoreUp() {
+		h.Stale, h.Unknown = true, true
+		h.Err = "the local object store is not running, so the backups it holds cannot be listed"
+		return h
+	}
+	newest, err := newestBackup()
+	if err != nil {
+		// Stale as well, which is what every earlier version said about a
+		// listing that failed: a reader that does not know about Unknown keeps
+		// the judgement it had.
+		h.Stale, h.Unknown = true, true
+		h.Err = firstLine(err.Error())
+		return h
+	}
+	if newest.IsZero() {
 		h.Stale = true
 		return h
 	}

@@ -108,7 +108,7 @@ var restartPolicy = []string{"--restart", "unless-stopped"}
 // command now runs under a context, so it is stopped and the failure says which
 // command it was and how long it waited.
 //
-// Two tiers, because one deadline cannot fit both: a base backup of a large
+// Tiers, because one deadline cannot fit every case: a base backup of a large
 // database legitimately runs for a long time, while `docker inspect` answering
 // slowly means something is wrong. The numbers are deliberately generous — the
 // point is to bound a hang, not to cut work short — and FOX_EXEC_TIMEOUT tunes
@@ -122,6 +122,18 @@ const (
 	execQuick = 10 * time.Minute
 	// execClean covers best-effort cleanup, which is never long.
 	execClean = 2 * time.Minute
+	// execProbe covers asking something that may not be there at all, where an
+	// answer that comes late is worth nothing. It is the one tier measured in
+	// seconds, because its caller is `fox check`: that is the command somebody
+	// runs when the install is already broken, and a line saying a thing could
+	// not be determined is worth more there than a correct line that never
+	// appears.
+	//
+	// It has to stay comfortably under the deadline `check` puts on a whole
+	// line (FOX_CHECK_TIMEOUT, ten seconds), so that the probe gives up first:
+	// the one that gives up first is the one that gets to say why, and the only
+	// one that can clean up the container it started.
+	execProbe = 5 * time.Second
 )
 
 // EnvExecTimeout tunes the long deadline (a duration such as "30m"), or switches
@@ -1029,6 +1041,8 @@ func Status() error {
 	h := CurrentBackupHealth()
 	fmt.Printf("target:   %s\nschedule: %s, keeping %d\n", h.Target, h.Schedule, backupRetain())
 	switch {
+	case h.Unknown:
+		fmt.Printf("WARNING: the base backups could not be listed: %s\n", h.Err)
 	case h.Newest == "":
 		fmt.Printf("WARNING: no base backup — point-in-time restore has nothing to start from; run `%s backup create`\n", brand.CLI)
 	case h.Stale:

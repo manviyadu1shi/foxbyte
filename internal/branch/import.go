@@ -246,14 +246,29 @@ func ImportCutoverTo(p *Progress, target string) error {
 }
 
 // TableCount returns the number of user tables in an instance (excludes system
-// schemas and the fox ledger schema).
+// schemas and the fox ledger schema). An instance that cannot be asked counts
+// as zero, which is what every caller here wants: they are about to import into
+// it, and "it has nothing in it" is the condition they are testing for.
 func TableCount(name string) int {
-	out, _ := capture("docker", "exec", container(name),
+	n, _ := TableCountOK(name)
+	return n
+}
+
+// TableCountOK is TableCount with the question separated from the answer: false
+// means the instance could not be asked at all. The difference matters to
+// anything that reports the count to a person — "main has no tables" and "main
+// is not running" send them to completely different commands, and a stopped
+// container answers the first way.
+func TableCountOK(name string) (int, bool) {
+	out, err := capture("docker", "exec", container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-tAc",
 		`SELECT count(*) FROM information_schema.tables
 		 WHERE table_schema NOT IN ('pg_catalog','information_schema','`+ledger.SchemaName+`')`)
-	n, _ := strconv.Atoi(strings.TrimSpace(out))
-	return n
+	if err != nil {
+		return 0, false
+	}
+	n, convErr := strconv.Atoi(strings.TrimSpace(out))
+	return n, convErr == nil
 }
 
 // --- source detection ---
