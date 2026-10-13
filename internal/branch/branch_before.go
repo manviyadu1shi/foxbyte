@@ -3,16 +3,19 @@
 package branch
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -282,19 +285,90 @@ func walgEnvFor(prefix string) []string {
 
 // listBaseBackups lists base backups from a throwaway container, so it works
 // whichever container is primary and whatever environment it was started with.
-func listBaseBackups() ([]walgBackup, error) {
-	args := append([]string{"docker", "run", "--rm", "--network", network}, walgEnv()...)
+func listBaseBackups() ([]walgBackup, error) { return listBaseBackupsWithin(execQuick) }
+
+// listBaseBackupsWithin is that listing, bounded by d.
+//
+// It used to run under no deadline at all — the one shell-out the deadline tiers
+// missed, although the tier comment names "a backup listing" as the case it
+// covers. An endpoint that accepts a connection and then goes quiet is exactly
+// what the local object store looks like once its container is gone, and wal-g
+// retries it from inside the container: on an install whose pool had been
+// destroyed, this never returned, and `fox check` sat behind it with nothing on
+// the screen.
+//
+// The container is named and labelled rather than anonymous because `docker run`
+// is a client: killing it does not stop what it started. A listing that was
+// given up on left a Postgres container up, holding the same bucket, outliving
+// the process that asked — so the name is removed here, and the label means
+// `stop` sweeps one that escaped anyway.
+func listBaseBackupsWithin(d time.Duration) ([]walgBackup, error) {
+	name := backupListContainer()
+	args := append([]string{"run", "--rm", "--name", name, "--label", managedLabel, "--network", network}, walgEnv()...)
 	args = append(args, pgImage(), "wal-g", "backup-list", "--json", "--detail")
-	out, err := exec.Command("sudo", args...).Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && strings.Contains(string(ee.Stderr), "No backups found") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("listing base backups: %w", err)
+	cmd, ctx, cancel := sudoCmd(d, "docker", args...)
+	defer cancel()
+	// Output into files rather than pipes, so the deadline means what it says.
+	// `sudo` runs `docker` as a child of its own, and killing sudo leaves that
+	// docker holding the write end of a pipe: Wait then blocks on it for
+	// WaitDelay — ten more seconds, which is long enough that whoever is
+	// waiting for this gives up before it can remove the container it started.
+	out, errOut, err := captureToFiles(cmd, "backup-list")
+	if err == nil {
+		return parseBackups(out)
 	}
-	return parseBackups(out)
+	if ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// The container is not a child of `docker run` — it belongs to the
+		// daemon and carries on without its client, which is how a `check`
+		// that was given up on left a Postgres container up behind it.
+		quiet("docker", "rm", "-f", name)
+		// Its own sentence rather than execErr's: the deadline here is
+		// whatever the caller allowed, which for `check` is the budget for
+		// one line — not FOX_EXEC_TIMEOUT, which execErr would name.
+		return nil, fmt.Errorf("the backup store did not answer within %s", d)
+	}
+	if strings.Contains(string(errOut), "No backups found") {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("listing base backups: %w", err)
 }
+
+// captureToFiles runs cmd with its output going to temporary files instead of
+// pipes, and returns what it wrote. See listBaseBackupsWithin for why: a
+// command that is killed on a deadline can leave a grandchild holding a pipe,
+// and Wait blocks on that long after the deadline has passed.
+func captureToFiles(cmd *exec.Cmd, label string) (stdout, stderr []byte, err error) {
+	o, err := os.CreateTemp("", label+"-out-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { o.Close(); os.Remove(o.Name()) }()
+	e, err := os.CreateTemp("", label+"-err-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { e.Close(); os.Remove(e.Name()) }()
+	cmd.Stdout, cmd.Stderr = o, e
+	runErr := cmd.Run()
+	stdout, _ = os.ReadFile(o.Name())
+	stderr, _ = os.ReadFile(e.Name())
+	return stdout, stderr, runErr
+}
+
+// backupListContainer names one throwaway listing container, uniquely per call
+// so two at once cannot collide.
+//
+// Deliberately outside the `pg-` prefix: that prefix is what RunningBranches
+// enumerates, and a listing that ran for a few seconds must not appear in `fox
+// list`, in the console, or in the change-feed sweep as a branch that exists.
+func backupListContainer() string {
+	// Process and sequence rather than a clock reading: two listings a moment
+	// apart can read the same nanosecond, and a name collision would fail the
+	// second listing with "name is already in use".
+	return fmt.Sprintf("backup-list-%d-%d", os.Getpid(), backupListSeq.Add(1))
+}
+
+var backupListSeq atomic.Uint64
 
 // flushWALArchive makes sure every WAL record written so far — including the
 // entry's commit — is archived, by switching to a new WAL segment and waiting

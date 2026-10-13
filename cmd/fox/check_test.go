@@ -5,6 +5,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thefoxbyte/foxbyte/internal/branch"
 	"github.com/thefoxbyte/foxbyte/internal/license"
@@ -289,4 +290,169 @@ func TestLicenceLine(t *testing.T) {
 			t.Errorf("an active licence differs on a standby:\n %q\n %q", a.detail, b.detail)
 		}
 	})
+}
+
+// `fox check` surviving the install it is run on.
+//
+// Every line here is a question put to something that may not be there, and
+// one of them — the base-backup listing — used to be asked with no deadline at
+// all. On a machine with no storage pool and no containers, `check` ran for
+// over ten minutes and printed nothing: not an error, not the lines that had
+// already answered, nothing. Both halves of that are the fault. A check that
+// cannot answer has to say so, and the report must not wait for it.
+func TestReportDoesNotWaitForAHangingCheck(t *testing.T) {
+	hang := make(chan struct{}) // never closed: this check never answers
+	t.Cleanup(func() { close(hang) })
+
+	var out strings.Builder
+	failed, warned := report(&out, []check{
+		one("version", func() checkLine { return ok("version", "fox 1.2.3") }),
+		one("backups", func() checkLine { <-hang; return ok("backups", "never reached") }),
+		one("storage", func() checkLine { return fail("storage", "no branch storage pool found", "fox setup") }),
+	}, 50*time.Millisecond)
+
+	got := out.String()
+	// The lines either side of the hang are the point: before this, one check
+	// that never returned took the whole report with it.
+	for _, want := range []string{"fox 1.2.3", "no branch storage pool found"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report lost a line that had answered (%q):\n%s", want, got)
+		}
+	}
+	// And the hanging one is named, with how long it was given, rather than
+	// being silently missing from a report that otherwise looks complete.
+	for _, want := range []string{"backups", "could not be determined in 50ms"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report does not say %q:\n%s", want, got)
+		}
+	}
+	// A question nobody could answer is not proof of a fault, so it must not
+	// turn `fox check` into a non-zero exit for anybody scripting it.
+	if failed != 1 || warned != 1 {
+		t.Errorf("failed=%d warned=%d, want 1 failure (storage) and 1 warning (the hang)", failed, warned)
+	}
+}
+
+// The lines are written as they resolve, not collected and printed at the end.
+// Proved by a check that cannot finish until the line before it has been
+// written: if the report were accumulated, that check would hang and be
+// reported as undetermined.
+func TestReportPrintsLinesAsTheyResolve(t *testing.T) {
+	printed := make(chan struct{})
+	w := &notifyWriter{on: "the first line", seen: printed}
+	var out strings.Builder
+	w.to = &out
+
+	report(w, []check{
+		one("version", func() checkLine { return ok("version", "the first line") }),
+		one("storage", func() checkLine {
+			select {
+			case <-printed:
+				return ok("storage", "saw the line before it")
+			case <-time.After(2 * time.Second):
+				return fail("storage", "the report was still being collected", "")
+			}
+		}),
+	}, 5*time.Second)
+
+	if !strings.Contains(out.String(), "saw the line before it") {
+		t.Errorf("the second check did not see the first line printed:\n%s", out.String())
+	}
+}
+
+// notifyWriter closes seen the first time a write contains on.
+type notifyWriter struct {
+	to   *strings.Builder
+	on   string
+	seen chan struct{}
+	done bool
+}
+
+func (w *notifyWriter) Write(b []byte) (int, error) {
+	n, err := w.to.Write(b)
+	if !w.done && strings.Contains(string(b), w.on) {
+		w.done = true
+		close(w.seen)
+	}
+	return n, err
+}
+
+// How long one check may take, and the escape hatch for an install that is
+// slow rather than stuck.
+func TestCheckTimeoutSetting(t *testing.T) {
+	t.Setenv("FOX_CHECK_TIMEOUT", "")
+	if got := checkTimeout(); got != 10*time.Second {
+		t.Errorf("unset gave %s, want 10s", got)
+	}
+	t.Setenv("FOX_CHECK_TIMEOUT", "90s")
+	if got := checkTimeout(); got != 90*time.Second {
+		t.Errorf("a 90s setting gave %s", got)
+	}
+	for _, off := range []string{"off", "0", "no"} {
+		t.Setenv("FOX_CHECK_TIMEOUT", off)
+		if got := checkTimeout(); got != 0 {
+			t.Errorf("%q should wait for ever, got %s", off, got)
+		}
+	}
+	// Nonsense keeps the default rather than becoming no deadline at all,
+	// which is the one value that brings the original hang back.
+	t.Setenv("FOX_CHECK_TIMEOUT", "soon")
+	if got := checkTimeout(); got != 10*time.Second {
+		t.Errorf("a bad value gave %s, want the default", got)
+	}
+}
+
+// With no deadline the check is run on this goroutine and answers in full —
+// the behaviour before this existed, kept for whoever wants to wait.
+func TestRunCheckWithNoDeadlineStillAnswers(t *testing.T) {
+	got := runCheck(one("version", func() checkLine { return ok("version", "answered") }), 0)
+	if len(got) != 1 || got[0].detail != "answered" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// Each check carries the name its line is reported under, and that name is
+// what a timed-out check is announced as — so a missing or duplicated one
+// would make the report ambiguous exactly when it matters most.
+func TestEveryCheckIsNamed(t *testing.T) {
+	seen := map[string]bool{}
+	for i, c := range checks() {
+		if strings.TrimSpace(c.name) == "" {
+			t.Errorf("check %d has no name", i)
+		}
+		if c.run == nil {
+			t.Errorf("check %q has nothing to run", c.name)
+		}
+		if seen[c.name] {
+			t.Errorf("two checks are called %q", c.name)
+		}
+		seen[c.name] = true
+	}
+	if len(seen) < 15 {
+		t.Errorf("only %d checks; the list looks truncated", len(seen))
+	}
+}
+
+// The two deadlines nest: a check's own shell-outs give up before the line's
+// deadline does. The inner one is the only one that can report why and the
+// only one that can remove the container it started, so it must not be the
+// one that loses the race.
+func TestProbeBudgetFitsInsideTheCheckDeadline(t *testing.T) {
+	t.Setenv("FOX_CHECK_TIMEOUT", "")
+	d := checkTimeout()
+	p := probeBudget(d)
+	if p <= 0 || p >= d {
+		t.Errorf("probe budget %s against a line deadline of %s: it has to be shorter and still positive", p, d)
+	}
+	// A tightened line deadline tightens the probe with it.
+	t.Setenv("FOX_CHECK_TIMEOUT", "4s")
+	if got := probeBudget(checkTimeout()); got != 2*time.Second {
+		t.Errorf("with a 4s line deadline the probe got %s", got)
+	}
+	// And "off" imposes nothing at either level, rather than quietly keeping a
+	// deadline somebody asked to be rid of.
+	t.Setenv("FOX_CHECK_TIMEOUT", "off")
+	if got := probeBudget(checkTimeout()); got != 0 {
+		t.Errorf("deadlines are off, but the probe still got %s", got)
+	}
 }

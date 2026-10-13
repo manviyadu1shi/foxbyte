@@ -15,8 +15,29 @@ import (
 // large database is legitimately long, while an inspect answering slowly is a
 // fault.
 func TestExecTiersAreOrdered(t *testing.T) {
-	if !(execClean < execQuick && execQuick < execLong) {
-		t.Errorf("tiers out of order: clean %s, quick %s, long %s", execClean, execQuick, execLong)
+	if !(execProbe < execClean && execClean < execQuick && execQuick < execLong) {
+		t.Errorf("tiers out of order: probe %s, clean %s, quick %s, long %s",
+			execProbe, execClean, execQuick, execLong)
+	}
+	// The probe tier exists for `fox check`, which someone runs when the
+	// install is already broken. A probe measured in minutes would be no
+	// different from the hang it replaced.
+	if execProbe > 30*time.Second {
+		t.Errorf("the probe tier is %s; `check` cannot wait that long for one line", execProbe)
+	}
+}
+
+// A longer FOX_EXEC_TIMEOUT must not lengthen the probe: it is set to let slow
+// real work finish, and `check` waiting an hour for one line is not that.
+func TestLongExecTimeoutLeavesTheProbeShort(t *testing.T) {
+	t.Setenv("FOX_EXEC_TIMEOUT", "3h")
+	if got := execTimeout(execProbe); got != execProbe {
+		t.Errorf("a 3h setting stretched the probe to %s", got)
+	}
+	// A shorter one still applies, as it does to every tier.
+	t.Setenv("FOX_EXEC_TIMEOUT", "2s")
+	if got := execTimeout(execProbe); got != 2*time.Second {
+		t.Errorf("a 2s setting left the probe at %s", got)
 	}
 }
 

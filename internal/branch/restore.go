@@ -146,8 +146,11 @@ type BackupInfo struct {
 // Backups lists the base backups in object storage, newest first. Read-only,
 // and read from a throwaway container, so it answers whichever container is
 // primary and even with the stack down.
-func Backups() ([]BackupInfo, error) {
-	bs, err := listBaseBackups()
+func Backups() ([]BackupInfo, error) { return backupsWithin(execQuick) }
+
+// backupsWithin is Backups with the listing bounded by d.
+func backupsWithin(d time.Duration) ([]BackupInfo, error) {
+	bs, err := listBaseBackupsWithin(d)
 	if err != nil {
 		return nil, err
 	}

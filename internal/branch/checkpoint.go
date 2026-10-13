@@ -70,10 +70,17 @@ func ledgerBranchName(name string) (string, error) {
 
 // ledgerLines runs a query as the superuser and returns its non-empty output
 // lines (one JSON document per row for the ledger queries).
+//
+// Bounded like every other question put to psql: this was the other shell-out
+// the deadline tiers missed, and a Postgres that is up but not yet accepting
+// connections keeps a client waiting rather than refusing it.
 func ledgerLines(name, sql string) ([]string, error) {
-	out, err := exec.Command("sudo", "docker", "exec", "--env-file", pgEnvFile(), container(name),
-		"psql", "-U", pgUser, "-d", pgDatabase, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql).Output()
+	cmd, ctx, cancel := sudoCmd(execQuick, "docker", "exec", "--env-file", pgEnvFile(), container(name),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql)
+	defer cancel()
+	out, err := cmd.Output()
 	if err != nil {
+		err = execErr(ctx, execQuick, "docker exec psql", err)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			return nil, fmt.Errorf("%s", strings.TrimSpace(string(ee.Stderr)))
