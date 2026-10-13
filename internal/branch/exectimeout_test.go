@@ -129,3 +129,91 @@ func TestExecErrLeavesOtherFailuresAlone(t *testing.T) {
 		t.Errorf("execErr with no context changed the error to %v", got)
 	}
 }
+
+// What a failing command said, which is the difference between a line somebody
+// can act on and "exit status 1".
+//
+// Reported against `fox check`: its Blackbox line said "cannot verify the
+// record: verify query: exit status 1" — true, and useless, because psql had
+// written the reason to stderr and capture dropped it.
+func TestCaptureErrorsKeepWhatTheCommandSaid(t *testing.T) {
+	psql := func(stderr string) error {
+		return withStderr(&exec.ExitError{ProcessState: nil, Stderr: []byte(stderr)})
+	}
+
+	t.Run("the reason reaches the error", func(t *testing.T) {
+		got := psql("psql: error: connection to server at \"pg-main\" failed: Connection refused\n" +
+			"\tIs the server running on that host and accepting TCP/IP connections?\n").Error()
+		if !strings.Contains(got, "Connection refused") {
+			t.Errorf("the error %q does not say what went wrong", got)
+		}
+		// One line, so a caller that prints the first line of an error prints
+		// the part that matters and nothing else.
+		if strings.Contains(got, "\n") {
+			t.Errorf("the error spans lines:\n%s", got)
+		}
+	})
+
+	t.Run("a command that said nothing is left alone", func(t *testing.T) {
+		bare := &exec.ExitError{}
+		if got := withStderr(bare); got != error(bare) {
+			t.Errorf("withStderr changed an empty failure into %v", got)
+		}
+	})
+
+	t.Run("something that is not a command failure is untouched", func(t *testing.T) {
+		// A deadline, for one: execErr says something better about it than a
+		// killed command's half-written stderr would.
+		plain := errors.New("context deadline exceeded")
+		if got := withStderr(plain); got != plain {
+			t.Errorf("withStderr changed %v", got)
+		}
+		if withStderr(nil) != nil {
+			t.Error("withStderr invented an error")
+		}
+	})
+
+	t.Run("the original error still matches", func(t *testing.T) {
+		// Callers compare errors, so wrapping must not break errors.Is/As.
+		ee := &exec.ExitError{Stderr: []byte("boom")}
+		var as *exec.ExitError
+		if !errors.As(withStderr(ee), &as) {
+			t.Error("the wrapped error is no longer an *exec.ExitError")
+		}
+	})
+}
+
+// stderrLine is what bounds the above, and everything it handles arrives from
+// outside the process.
+func TestStderrLine(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"nothing", "", ""},
+		{"blank lines only", "\n  \n\t\n", ""},
+		{"a leading blank line is skipped", "\n\nERROR:  relation \"x\" does not exist",
+			`ERROR:  relation "x" does not exist`},
+		{"trailing whitespace goes", "  psql: fatal  \n", "psql: fatal"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stderrLine([]byte(c.in)); got != c.want {
+				t.Errorf("stderrLine(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	t.Run("a very long line is cut and marked", func(t *testing.T) {
+		got := stderrLine([]byte(strings.Repeat("x", stderrShown+50)))
+		if len([]rune(got)) != stderrShown+1 || !strings.HasSuffix(got, "…") {
+			t.Errorf("a long line became %d runes ending %q", len([]rune(got)), got[len(got)-4:])
+		}
+	})
+
+	t.Run("it cuts by rune, not by byte", func(t *testing.T) {
+		// Postgres answers in the server's locale, so an error message is not
+		// necessarily ASCII, and half a character is not a character.
+		got := stderrLine([]byte(strings.Repeat("é", stderrShown+10)))
+		if !strings.HasSuffix(got, "é…") {
+			t.Errorf("a multi-byte line was cut mid-character: %q", got[len(got)-6:])
+		}
+	})
+}
