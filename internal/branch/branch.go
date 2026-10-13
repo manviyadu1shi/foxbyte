@@ -349,7 +349,7 @@ func primaryArgs(walLevel string) []string {
 		"-c", "wal_level=" + walLevel,
 		"-c", "archive_mode=on",
 		"-c", "archive_command=wal-g wal-push %p",
-		"-c", "archive_timeout=60",
+		"-c", fmt.Sprintf("archive_timeout=%d", archiveTimeoutSeconds),
 		"-c", "listen_addresses=*",
 	}
 }

@@ -412,6 +412,7 @@ fox ha failover                 # promote the standby; 'main' reroutes to it
 fox ha disable
 fox ha failback                 # after a failover: back to main's own container, keeping every write
 fox ha sync on | off            # zero data loss: a commit waits for the standby
+fox ha drill --yes              # kill the primary for real, and report what it cost
 ```
 
 Replication is asynchronous by default: commits never wait, and losing the
@@ -421,6 +422,12 @@ has it on disk, so nothing is lost, and every write is slower by the round trip
 to the standby. There is one standby, so **if it stops, writes stop**;
 `fox ha sync off` releases them and works while they are waiting. `fox check`
 carries a **durability** line saying which of the two is in effect.
+
+`fox ha drill` is how you find out what a failover actually costs here rather
+than taking anyone's word for it: it kills the primary with writes in flight,
+recovers through the same path `fox ha failover` uses, and writes a dated report
+to `~/.fox/drills/` with the writes lost and the time to service — alongside the
+configuration that produced them, and what the drill did not test.
 
 **Accounts & keys**
 
