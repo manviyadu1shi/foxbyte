@@ -958,10 +958,46 @@ Unlocks: a dated artifact in `~/.fox/drills/` that a procurement review can
 read. The claim is no longer a claim, for the topology we have; phase 1 is what
 makes it a claim about surviving a machine.
 
-### Phase 7 — reads from standbys (small to medium)
+### Phase 7 — reads from standbys (small to medium) — **done, and smaller than it looks**
 
 Route read-only sessions to a standby, through a separate database name. Lower
 priority than it looks: it is a performance feature, and nothing above it is.
+
+*Done.* `main:standby` instead of `main` — same gateway, same API key — and the
+standby answers it. The suffix is resolved in the gateway before anything looks
+at the name, so the ACL, a key's scope, the audit record and the per-user role
+are all about the branch: a suffix chooses a backend, never a different thing to
+be allowed. `:` because it is the one readable separator a branch name can never
+contain, which reserves the namespace without reserving a name anybody might
+want.
+
+Four refusals, each naming the command that resolves it: no standby, a branch
+(which has none), a standby that is not running, and a **promoted** standby —
+the one that matters, because a read-only DSN silently becoming a connection to
+the primary would keep working, keep looking right, and put every read back on
+the machine the reader was trying to spare.
+
+*What it buys, which is less than the phase name suggests.* On one machine the
+gain is process isolation, not more hardware: a long sequential scan stops
+evicting the primary's buffer cache and stops competing for its backends. Real,
+and modest. **The cross-machine case — the one that is actually read scaling —
+is refused, and the reason is not routing.** A joined node's copy carries the
+*primary's* roles, whose passwords derive from the primary's install secret,
+while the second machine's gateway has its own secret and its own accounts. The
+login fails. So phase 7 across machines is blocked on §3.2's shared state, which
+is phase 2, and the refusal says so rather than failing at the backend
+handshake.
+
+That is worth recording as a correction to this section's own estimate: phase 7
+was sized as "small to medium" on the assumption that routing was the work. The
+routing took an afternoon. The half that makes it a scaling feature is a
+different phase.
+
+Staleness is reported rather than capped — `ha status` says how far behind the
+copy is, `fox connect` prints the read-only DSN with the caveat — because there
+is no defensible default for a lag ceiling, and a connection that works or not
+depending on how busy the primary was a second ago is worse than one slightly
+behind.
 
 ### Active-active
 
@@ -979,6 +1015,11 @@ pitch is a tamper-evident record. Route B is a different product.
   data loss during an incident.
 - **Phase 7 before Phase 3.** Read scaling is a nice-to-have; surviving a
   machine failure is the thing being bought.
+
+  *Since Phase 7:* the order held — fencing landed first. And the phase turned
+  out to be two features wearing one name: the routing, which is done, and read
+  scaling, which needs a second machine able to authenticate against a copy of
+  somebody else's roles. Only the first was ever "small to medium".
 - **Promise RPO and RTO numbers before Phase 6's drill measures them.** The
   figures in the document are estimates from the code and say so; ours should
   come from a drill or not be quoted.

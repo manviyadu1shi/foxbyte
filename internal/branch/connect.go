@@ -68,6 +68,16 @@ func Connect(name string, dsnOnly bool) error {
 	fmt.Printf("  %s\n", GatewayDSN(name, ""))
 	fmt.Printf("\nThat password is an API key, not an account password. Mint one with:\n")
 	fmt.Printf("  %s apikey create <email> %s\n", brand.CLI, name)
+	// The read-only endpoint, offered where somebody is already looking for a
+	// connection string rather than behind a flag they would have to know
+	// about. Only when there is a standby to answer it, and the same key opens
+	// both: it is the same branch, read from the copy.
+	if _, err := StandbyReadAddr(name); err == nil {
+		fmt.Printf("\nRead-only sessions can be answered by the standby instead, which keeps a long\n"+
+			"report off the primary. Same key, one different name — and the data may be a\n"+
+			"little behind (`%s ha status` says how far):\n", brand.CLI)
+		fmt.Printf("  %s\n", GatewayDSN(StandbyReadName(name), ""))
+	}
 	if dsnOnly {
 		return nil
 	}
