@@ -21,6 +21,23 @@ FAIL=0
 ok()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
+assert_contains() { case "$2" in *"$3"*) ok "$1";; *) bad "$1 (got '$2', want something containing '$3')";; esac; }
+
+# A helper this suite does not define used to be silent. bash printed "command
+# not found" on stderr, the assertion produced neither a PASS nor a FAIL, and
+# the run still reported zero failures -- which is how eight assertions in
+# section 6b ran as nothing at all while the suite looked green. An unknown
+# command is a failed assertion now, and 127 keeps the shell's own meaning.
+#
+# The flag file is not belt-and-braces: bash runs this handler in a subshell, so
+# incrementing FAIL here would be thrown away with the subshell and the summary
+# would still say zero. The file is the only thing that crosses back.
+MISSING_CMD_FLAG="$(mktemp -t fox-missing-cmd.XXXXXX)"; rm -f "$MISSING_CMD_FLAG"
+command_not_found_handle() {
+  echo "  FAIL: this suite called a command that does not exist: $1"
+  echo "$1" >> "$MISSING_CMD_FLAG"
+  return 127
+}
 # pg <container> <sql>  -> tuples-only result
 pg() { local c="$1"; shift; sudo docker exec -e PGPASSWORD=foxbyte "$c" psql -U dbadmin -d appdb -tAc "$*" 2>/dev/null; }
 # pgt is pg with a deadline, for section 6's zero-data-loss block. The failure
@@ -60,6 +77,16 @@ rm -f "$HOME/$BRAND_STATE_DIR"/auth.db "$HOME/$BRAND_STATE_DIR"/auth.db-wal "$HO
 # they would anchor events this fresh store does not have — which `fox audit
 # verify` rightly calls tampering.
 rm -rf "$HOME/$BRAND_STATE_DIR/anchors/_security-log"
+# Zero-data-loss mode is an intent that outlives the containers, so a run cut
+# short after `ha sync on` leaves it behind -- and then `ha enable` in section 6
+# dutifully puts the mode back, and the first assertion there ("commits do not
+# wait by default") fails for a reason that has nothing to do with it.
+rm -f "$HOME/$BRAND_STATE_DIR/sync-commit"
+# And the primary pointer, for the same reason: a run cut short after a failover
+# leaves 'main' pointing at the promoted standby. `stop` above has already
+# removed every container, so there is no promoted standby left to protect, and
+# an absent pointer means main -- which is what a fresh start expects.
+rm -f "$HOME/$BRAND_STATE_DIR/primary"
 BANNER="$($S start 2>&1)"; sleep 5
 assert_eq "start prints no API key" "$(echo "$BANNER" | grep -c "$DB_KEY_PREFIX[A-Za-z0-9]")" "0"
 assert_eq "…and caches none on disk" "$([ -f "$HOME/$BRAND_STATE_DIR/config" ] && echo present || echo none)" "none"
@@ -448,6 +475,37 @@ assert_eq "gateway writes to main after failback" "$W" "okwrite"
 pg pg-main "SELECT pg_switch_wal()" >/dev/null; sleep 5
 assert_eq "main archives WAL again" "$(pg pg-main 'SELECT archived_count > 0 AND last_failed_wal IS NULL FROM pg_stat_archiver')" "t"
 
+echo "### 6b. failover drill (HA plan phase 6)"
+# The drill is the deliverable of phase 6: "we fail over in about a minute" is a
+# claim, and a dated report from a real failover is evidence. So what is
+# asserted here is mostly that the report says the right things -- including the
+# things that stop it being misquoted.
+assert_contains "a drill without --yes refuses, and says it is an outage" \
+  "$($S ha drill 2>&1)" "real outage"
+assert_contains "a drill with no standby refuses, and names the way in" \
+  "$($S ha drill --yes 2>&1)" "ha enable"
+$S ha enable >/dev/null 2>&1; sleep 5
+$S ha sync on >/dev/null 2>&1
+D=/tmp/drill.out
+$S ha drill --yes --writes 60 --failback >"$D" 2>&1
+assert_eq "a drill runs and exits 0" "$?" "0"
+assert_contains "…reporting the writes it lost" "$(cat "$D")" "Acknowledged writes lost (RPO)"
+assert_contains "…and the time until the new primary took a write" "$(cat "$D")" "Kill to a write on the new primary (RTO)"
+# With zero-data-loss mode on, zero is a guarantee of the configuration. The
+# report has to say which of the two it is, because only one may be quoted.
+assert_contains "…calling zero a property of the configuration, not a sample" \
+  "$(cat "$D")" "property of the configuration"
+assert_contains "…saying RTO excludes noticing the failure" "$(cat "$D")" "does not include noticing the failure"
+assert_contains "…and what the drill did not test" "$(cat "$D")" "What this drill did not test"
+DREPORT="$(sed -n 's/^Saved to //p' "$D" | tail -1)"
+assert_eq "…and the report was saved" "$([ -s "$DREPORT" ] && echo yes)" "yes"
+assert_contains "…dated, so it is evidence rather than a note" "$(head -1 "$DREPORT")" "Failover drill"
+assert_eq "--failback returns the install to main" "$(cat "$HOME/.fox/primary" 2>/dev/null)" "main"
+assert_eq "…and the drill left no schema of its own behind" \
+  "$(pg pg-main "SELECT count(*) FROM information_schema.schemata WHERE schema_name='fox_drill'")" "0"
+$S ha sync off >/dev/null 2>&1
+$S ha disable >/dev/null 2>&1
+
 echo "### 7. regression: reaper never suspends the standby"
 $S ha enable >/dev/null 2>&1; sleep 2
 $S branch create rgn >/dev/null 2>&1
@@ -830,6 +888,17 @@ $S branch delete faithtest >/dev/null 2>&1
 sudo docker rm -f mongo-src >/dev/null 2>&1
 for b in impbad impok jsonbad jsonok; do $S branch delete "$b" >/dev/null 2>&1; done
 rm -f /tmp/imp_bad.sql /tmp/imp_ok.sql /tmp/imp_bad.json /tmp/imp_ok.json /tmp/failback.log
+
+# Anything the suite called that does not exist, counted now that the subshells
+# it happened in are gone.
+if [ -s "$MISSING_CMD_FLAG" ]; then
+  MISSING="$(wc -l < "$MISSING_CMD_FLAG" | tr -d ' ')"
+  FAIL=$((FAIL + MISSING))
+  echo
+  echo "  $MISSING assertion(s) called a command this suite does not define:"
+  sort -u "$MISSING_CMD_FLAG" | sed 's/^/    /'
+fi
+rm -f "$MISSING_CMD_FLAG"
 
 echo
 echo "==== ${PASS} passed, ${FAIL} failed ===="

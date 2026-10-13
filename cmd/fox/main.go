@@ -704,7 +704,7 @@ func branchCmd(args []string) {
 // haCmd dispatches `fox ha <subcommand>`.
 func haCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("usage: %s ha <enable|status|failover|disable|failback|sync on|sync off>\n", brand.CLI)
+		fmt.Printf("usage: %s ha <enable|status|failover|disable|failback|sync on|sync off|drill>\n", brand.CLI)
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -720,6 +720,8 @@ func haCmd(args []string) {
 		must(branch.HAFailback())
 	case "sync":
 		haSyncCmd(args[1:])
+	case "drill":
+		haDrillCmd(args[1:])
 	default:
 		fmt.Printf("unknown ha subcommand: %s\n", args[0])
 		os.Exit(2)
@@ -748,6 +750,58 @@ func haSyncCmd(args []string) {
 		fmt.Printf("unknown: %s ha sync %s — expected on or off\n", brand.CLI, args[0])
 		os.Exit(2)
 	}
+}
+
+// haDrillCmd runs a failover drill and writes the report.
+//
+// It needs --yes because it causes a real outage: the primary is killed without
+// warning, which is the only way to measure what that costs. Nothing is lost
+// that the standby had received, and the report says so.
+func haDrillCmd(args []string) {
+	if hasFlag(args, "-h") || hasFlag(args, "--help") {
+		fmt.Printf("usage: %s ha drill --yes [--writes N] [--failback]\n\n"+
+			"Kills the primary while writes are in flight, promotes the standby through\n"+
+			"`%s ha failover`, and reports what it cost: acknowledged writes lost (RPO) and\n"+
+			"time until the new primary took a write (RTO).\n\n"+
+			"This is an outage. Writes fail from the kill until the promotion completes,\n"+
+			"usually a few seconds. No write the standby had already received is lost.\n\n"+
+			"  --writes N   rows to write, half of them before the kill (default 400)\n"+
+			"  --failback   return to normal running afterwards, and time that too\n\n"+
+			"The report is written to %s and printed.\n",
+			brand.CLI, brand.CLI, branch.DrillReportDir())
+		return
+	}
+	if !hasFlag(args, "--yes") {
+		fmt.Printf("A drill is a real outage: it kills the primary while writes are in flight and\n"+
+			"promotes the standby. Writes fail for a few seconds; nothing the standby already\n"+
+			"had is lost.\n\nRun it with --yes when you are ready:\n  %s ha drill --yes\n", brand.CLI)
+		os.Exit(2)
+	}
+	writes := 400
+	if v := optValue(args, "--writes"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 2 {
+			fmt.Fprintf(os.Stderr, "error: --writes %q is not a number of rows above 1\n", v)
+			os.Exit(2)
+		}
+		writes = n
+	}
+	o := branch.DrillOptions{Writes: writes, Failback: hasFlag(args, "--failback")}
+	r, err := branch.Drill(o)
+	// Printed and saved even when the drill failed part way, because a drill
+	// that went wrong is the most interesting kind and the numbers it reached
+	// are the evidence of what happened. But only once it started: a drill
+	// refused for having no standby has nothing to report, and a document of
+	// zeroes would bury the refusal.
+	if r.Measured() {
+		path, werr := branch.SaveDrillReport(r)
+		fmt.Println()
+		fmt.Print(r.Report())
+		if werr == nil {
+			fmt.Printf("\nSaved to %s\n", path)
+		}
+	}
+	must(err)
 }
 
 func must(err error) {

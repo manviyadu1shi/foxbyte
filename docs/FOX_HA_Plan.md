@@ -467,15 +467,100 @@ additionally wait for replay — read-your-writes on the standby, at more latenc
 Unlocks: RPO of zero inside the data centre. Phase 1 is what makes the quorum
 form mean what the plan originally claimed.
 
-### Phase 6 — DR site and drills (medium)
+### Phase 6 — DR site and drills — **the drill is done; the site waits on phase 1**
 
-An asynchronous standby at the second site; the WAL archive to an object store
-there with retention. Then a scripted drill that **measures and reports** real
-RPO and RTO.
+The plan said it itself: "the drill is the deliverable, not the standby". The
+drill is built. The second site is not, and cannot be — an asynchronous standby
+*at another site* needs a standby on another machine, which is phase 1, of which
+this plan says "everything after this depends on it". So this phase lands in the
+order its own dependencies allow:
 
-The drill is the deliverable, not the standby. "We fail over in about a minute"
-is a claim; a dated drill report is evidence, and evidence is what gets through
-a procurement review.
+| | |
+|---|---|
+| A scripted drill that measures and reports real RPO and RTO | **done** |
+| The WAL archive at a second site with retention | **already possible** — a remote S3 target with Object Lock, which `fox backup target set` has supported since before this plan, and `fox check` has warned about since phase 0. Configuration, not code |
+| An asynchronous standby at the second site | **blocked on phase 1** |
+
+#### `fox ha drill --yes`
+
+It ends the primary without warning, recovers through the real failover path,
+and writes a dated report. Three things make it a drill rather than a
+demonstration, and each was a decision:
+
+**It kills the primary rather than stopping it.** `docker stop` sends SIGTERM,
+Postgres does a fast shutdown, and a fast shutdown flushes its remaining WAL to
+the standby before exiting — so a stopped primary loses nothing and the number
+would be a flattering fiction. A machine that dies does not say goodbye, so the
+drill sends SIGKILL.
+
+**It kills it with writes in flight**, half way through the run, from a single
+session that reads back each commit the server acknowledged. A drill against an
+idle database measures an idle database, and the only honest definition of data
+loss is a write the client was *told* had happened which then had not.
+
+**It recovers through `HAFailover`** — the same function `fox ha failover`
+calls, not a promotion written for the test. What is measured is the thing that
+ships.
+
+Measured on the single-VM topology: **0 of 60 acknowledged writes lost, and
+400ms from the kill to a write on the new primary.** Those are real numbers from
+a real run, and the report spends more words on what they do not mean than on
+what they are.
+
+#### The number that would have been misquoted
+
+The first real run lost **nothing** — with *asynchronous* replication. On one
+host, with a standby microseconds behind, that is the usual outcome, and it is
+exactly the figure somebody would put in a tender. Asynchronous replication
+promises nothing of the sort.
+
+So the report never prints a measurement without the configuration that produced
+it, and says plainly which of the two may be quoted:
+
+- **zero-data-loss mode on** → RPO zero is a property of the configuration, and
+  the measurement is "a confirmation, not the evidence".
+- **asynchronous, nothing lost** → "Nothing, on the strength of this." The
+  standby was keeping up; a busier primary, a slower link, or a standby doing
+  anything else would all lose writes, and nothing bounds how many.
+- **asynchronous, writes lost** → the loss is what *this* workload cost at *this*
+  rate on *this* machine. What may be promised is the archive: `archive_timeout`
+  seconds, once the archive is somewhere the machine's failure cannot reach.
+
+That last clause is why the report shouts when the archive is still local: with
+backups on the same disk as the database, no figure in the report is a
+disaster-recovery figure at all.
+
+`archive_timeout` is now one constant rather than a literal in the primary's
+arguments and another in the report, because a report that disagreed with the
+setting would be worse than no report, and a test holds them equal.
+
+#### What the report says it did not test
+
+The section that stops it being misused, because the measured figures are the
+part that gets quoted:
+
+- **Losing a machine.** The standby is a container on the same host, sharing its
+  disk and its power. The drill measures promotion and rerouting, not survival
+  of the host. (Phase 1.)
+- **Noticing.** Detection and the decision to fail over were manual, and the RTO
+  clock starts at the kill. (Phase 3.)
+- **A second site.** There is only one. (Phase 1.)
+
+#### Smaller things it turned up
+
+The drill's own `DROP TABLE` was refused by the Blackbox guardrail, which is the
+guardrail working: it is one of the two that stay free in every edition. A drill
+does not get an exemption from the product's own rules, so it creates its schema
+and empties it with a qualified `DELETE` instead, and the one place that
+overrides anything is the cleanup at the end, which says so.
+
+A drill refused before it starts — no standby, already failed over — prints the
+refusal and nothing else. The first version printed a report of zeroes, which
+buried it.
+
+Unlocks: a dated artifact in `~/.fox/drills/` that a procurement review can
+read. The claim is no longer a claim, for the topology we have; phase 1 is what
+makes it a claim about surviving a machine.
 
 ### Phase 7 — reads from standbys (small to medium)
 
@@ -501,6 +586,11 @@ pitch is a tamper-evident record. Route B is a different product.
 - **Promise RPO and RTO numbers before Phase 6's drill measures them.** The
   figures in the document are estimates from the code and say so; ours should
   come from a drill or not be quoted.
+
+  *Since Phase 6:* `fox ha drill` measures them, and the report distinguishes a
+  figure that may be quoted from one that may not — which turned out to be the
+  harder half. A drill on one host with asynchronous replication loses nothing
+  most of the time, and that number is worth less than it looks.
 
 ## 6. Decisions needed before Phase 1
 
