@@ -514,6 +514,23 @@ assert_eq "…and that standby is untouched by the refusal" \
   "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
 assert_contains "leaving is a no-op on an install that follows nobody" \
   "$($S node leave 2>&1)" "follows no other primary"
+# Fencing (phase 3) is asserted by what this section already does, and
+# deliberately adds nothing here.
+#
+# A standby of this machine's own main needs no fence: HAFailover stops the
+# local primary, which is the whole of it when both are containers here. The
+# proof that the new check does not refuse that is the plain `ha failover`
+# below, which passes with no --force.
+#
+# The cross-machine refusal needs two machines and was verified between two VMs
+# on a shared network: refused with the primary alive and the standby left in
+# recovery, promoted once that primary was genuinely stopped, and --force
+# warning before it proceeds.
+#
+# The first version of this block ran its own failover *and failback* here, and
+# a failback destroys the standby -- so the zero-data-loss block, the drill and
+# much of what follows ran with no standby at all. Twenty-one failures from one
+# redundant assertion.
 # ---- end phase 1 -----------------------------------------------------------
 
 # ---- zero-data-loss mode (HA plan phase 5) --------------------------------

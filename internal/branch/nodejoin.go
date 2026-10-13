@@ -5,8 +5,10 @@ package branch
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -214,6 +216,68 @@ func StandbyStreamingFromRemote() bool {
 	return err == nil && strings.TrimSpace(out) == "1"
 }
 
+// RemotePrimaryAnswering reports whether the primary this install follows is
+// still serving on the address it was joined at.
+//
+// A TCP connection and nothing more, deliberately. The question being asked is
+// "would promoting here produce a second primary", and anything that answers on
+// that port is reason enough to believe it would. A richer probe — connect,
+// ask pg_is_in_recovery — would be more precise and would need credentials and
+// a working TLS handshake to say "no", which means it would answer "the primary
+// is gone" for a certificate problem. The conservative error is to refuse a
+// promotion that might have been safe; the expensive one is to allow a
+// promotion that was not.
+func RemotePrimaryAnswering(j Joined, timeout time.Duration) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(j.Address, strconv.Itoa(j.Port)), timeout)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// fenceRemotePrimary refuses a promotion that would make two primaries.
+//
+// This closes a hole that `node join` opened. On one machine HAFailover stops
+// the old primary before promoting the standby, and "stop the old primary" is
+// the whole of fencing when both are containers here. Across machines it
+// stopped the wrong thing: PrimaryContainer() is this host's own pg-main, which
+// on a joined node is an idle database nobody uses, while the real primary went
+// on serving writes somewhere else.
+//
+// Measured, with the primary left healthy: after `ha failover` both machines
+// accepted writes and the promoted one reported pg_is_in_recovery() false. Two
+// primaries, diverging, with nothing to say so.
+//
+// What this does and does not fix. It refuses to promote while the primary
+// answers, which covers the case that produced that measurement — an operator
+// promoting a standby whose primary is fine. It cannot cover a network
+// partition: if this machine cannot reach the primary but clients still can,
+// promoting here produces exactly the split-brain above and no amount of local
+// probing can tell the two situations apart. That needs a third opinion, which
+// is what phase 3's failover manager is for. Said here rather than implied,
+// because a guard that looks like a solution is worse than one that names its
+// limit.
+func fenceRemotePrimary(force bool) error {
+	j, ok := CurrentJoin()
+	if !ok {
+		return nil // a standby of this machine's own main: stopping it is enough
+	}
+	answering := RemotePrimaryAnswering(j, 5*time.Second)
+	if !answering {
+		return nil
+	}
+	if force {
+		fmt.Printf("\nWARNING: %s:%d is still answering, and --force was given.\n"+
+			"If it is still serving clients, both machines are about to accept writes and the\n"+
+			"two copies will diverge with no way to merge them. This is only safe if that\n"+
+			"machine has been stopped, isolated or fenced by something other than this\n"+
+			"command.\n\n", j.Address, j.Port)
+		return nil
+	}
+	return fmt.Errorf("%s", fenceRefusal(j))
+}
+
 // NodeLeave stops following the primary. The standby's storage goes with it,
 // because a copy of somebody else's database that nothing keeps up to date is
 // not a backup, it is a stale liability.
@@ -245,4 +309,19 @@ func DescribeJoin() string {
 		return ""
 	}
 	return fmt.Sprintf("a standby of %s:%d, over TLS as %s", j.Address, j.Port, j.Role)
+}
+
+// fenceRefusal is what the refusal says, separated so a test can read it: this
+// message is the whole value of the guard, because somebody reads it during an
+// incident and it has to name both the way forward and its own limit.
+func fenceRefusal(j Joined) string {
+	return fmt.Sprintf("the primary at %s:%d is still answering, so promoting this standby would\n"+
+		"make a second primary and the two copies would diverge.\n\n"+
+		"This command cannot stop a database on another machine. Stop that one first, then\n"+
+		"run this again \u2014 or pass --force if it is already isolated by something else.\n\n"+
+		"This check cannot tell a dead primary from one this machine merely cannot reach: if\n"+
+		"the network is partitioned and clients can still reach %s, forcing a promotion here\n"+
+		"produces two primaries anyway. That needs a third opinion, which is what a failover\n"+
+		"manager is for (phase 3 of docs/FOX_HA_Plan.md).",
+		j.Address, j.Port, j.Address)
 }

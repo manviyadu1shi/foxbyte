@@ -138,7 +138,9 @@ func Drill(o DrillOptions) (DrillResult, error) {
 	}
 
 	// Recovery, through the command an operator would run.
-	if err := HAFailover(); err != nil {
+	// The drill killed the local primary itself, so there is nothing left to
+	// fence and nothing to force past.
+	if err := HAFailover(false); err != nil {
 		return r, fmt.Errorf("the drill killed the primary and the failover failed: %w\n"+
 			"The install is mid-failover; `%s ha status` says where it is", err, brand.CLI)
 	}

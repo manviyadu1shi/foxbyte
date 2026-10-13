@@ -448,15 +448,27 @@ func HAStatus() error {
 	return nil
 }
 
-// HAFailover promotes the standby to primary and reroutes "main" to it. The old
-// primary is stopped to avoid split-brain.
-func HAFailover() error {
+// HAFailover promotes the standby to primary and reroutes "main" to it.
+//
+// The old primary is stopped first, which is the whole of fencing while both
+// are containers on this machine. It is not enough when the primary is on
+// another machine — see fenceRemotePrimary, which refuses rather than making a
+// second one.
+//
+// force skips that refusal, for a primary an operator has already isolated by
+// other means. It does not skip stopping the local one.
+func HAFailover(force bool) error {
 	old := PrimaryContainer()
 	if err := haGuard("failover", old); err != nil {
 		return err
 	}
 	if ContainerState("standby") != "running" {
 		return fmt.Errorf("no running standby to promote — run 'foxbyte ha enable' first")
+	}
+	// Before the promotion, not after: a refusal has to come while there is
+	// still only one primary.
+	if err := fenceRemotePrimary(force); err != nil {
+		return err
 	}
 	if err := run("docker", "exec", "--env-file", pgEnvFile(), container("standby"),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c", "SELECT pg_promote();"); err != nil {
@@ -481,8 +493,11 @@ func HAFailover() error {
 				j.Address, j.Port, err, joinedPath(), brand.CLI)
 		} else {
 			fmt.Printf("this machine no longer follows %s:%d — it is the primary now, holding every\n"+
-				"write that reached it. Give it a standby with `%s ha enable`, or let the old\n"+
-				"primary join this one.\n", j.Address, j.Port, brand.CLI)
+				"write that reached it.\n", j.Address, j.Port)
+			fmt.Printf("  %s must NOT be started as a primary again: it would accept writes this\n"+
+				"  machine never sees, and nothing could merge the two. Bring it back with\n"+
+				"  `%s node join` against this machine, which replaces its copy.\n",
+				j.Address, brand.CLI)
 		}
 	}
 	// Zero-data-loss mode does not survive the promotion, and must not.

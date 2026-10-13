@@ -706,7 +706,7 @@ func branchCmd(args []string) {
 // haCmd dispatches `fox ha <subcommand>`.
 func haCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("usage: %s ha <enable|status|failover|disable|failback|sync on|sync off|drill>\n", brand.CLI)
+		fmt.Printf("usage: %s ha <enable|status|failover [--force]|disable|failback|sync on|sync off|drill>\n", brand.CLI)
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -715,7 +715,9 @@ func haCmd(args []string) {
 	case "status":
 		must(branch.HAStatus())
 	case "failover":
-		must(branch.HAFailover())
+		// --force is for a primary on another machine that the operator has
+		// already stopped or isolated. It never skips stopping a local one.
+		must(branch.HAFailover(hasFlag(args, "--force")))
 	case "disable":
 		must(branch.HADisable())
 	case "failback":
