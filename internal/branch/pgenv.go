@@ -20,7 +20,49 @@ import (
 var (
 	pgEnvOnce sync.Once
 	pgEnvPath string
+
+	replicaEnvOnce sync.Once
+	replicaEnvPath string
 )
+
+// replicaEnvFile is the same mechanism for the replication role's password,
+// which the base backup reads (replicationrole.go).
+//
+// Here rather than beside the role it belongs to, because this file is one of
+// the two TestNoPasswordOnCommandLines exempts — and the right answer to that
+// test is one place that knows how to write a credential file, not a third
+// exemption. A second credential is no reason to lower the bar for the first.
+func replicaEnvFile() string {
+	replicaEnvOnce.Do(func() {
+		replicaEnvPath = writeEnvFile("replica.env",
+			fmt.Sprintf("PGPASSWORD=%s\n", ReplicationRolePassword()))
+	})
+	return replicaEnvPath
+}
+
+// writeEnvFile puts one credential file in the state directory, 0600, and
+// returns its path. Written beside and renamed over, so a process reading it
+// never sees half a file. On failure it still returns the path, because docker
+// reports a missing env file and names it, which is a better error than
+// anything this could invent.
+func writeEnvFile(name, body string) string {
+	p := brand.StatePath(name)
+	if cur, err := os.ReadFile(p); err == nil && string(cur) == body {
+		return p
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err == nil {
+		tmp, err := os.CreateTemp(filepath.Dir(p), "."+name+"-*")
+		if err == nil {
+			_, werr := tmp.Write([]byte(body))
+			cerr := tmp.Close()
+			if werr == nil && cerr == nil && os.Chmod(tmp.Name(), 0o600) == nil && os.Rename(tmp.Name(), p) == nil {
+				return p
+			}
+			_ = os.Remove(tmp.Name())
+		}
+	}
+	return p
+}
 
 // pgEnvFile returns the path of the env file holding the superuser password
 // (PGPASSWORD for the clients, POSTGRES_PASSWORD for a container's first

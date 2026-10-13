@@ -201,17 +201,97 @@ call under a ten-minute deadline. `fox backup target show` does that.
 bucket for an operator. The check now tells every install that its backups are
 one disk failure from gone; acting on it is theirs.
 
-### Phase 1 — a standby on another machine (large)
+### Phase 1 — a standby on another machine (large) — **started: the replication role**
 
-- `fox node join <primary>` — a second install builds its standby over the
-  network from a base backup or the WAL archive.
-- TLS on replication traffic; a dedicated replication role rather than
-  widening `allowReplication`.
-- Distribute the install secret and signing keys to each node, since every
-  role password is derived from the secret.
-- `standbyRunArgs` grows a remote primary address.
+| | |
+|---|---|
+| A dedicated replication role rather than widening `allowReplication` | **done** |
+| TLS on replication traffic | **not started** — Postgres has no TLS at all today, so this is a new subsystem, not a setting |
+| `fox node join <primary>` — a second install builds its standby over the network | **not started** |
+| Distribute the install secret and signing keys to each node | **not started** — a decision about key distribution before it is a function |
+| `standbyRunArgs` grows a remote primary address | **not started** |
 
 Unlocks: survives losing a machine. Everything after this depends on it.
+
+#### The replication role, and why it was worth doing first
+
+It is the one item that is worth having on a single machine, so it did not have
+to wait for the rest.
+
+`ha enable` used to append this to the primary's `pg_hba.conf`:
+
+```
+host replication all all scram-sha-256
+```
+
+Any role, from any address. And the standby then connected as the **bootstrap
+superuser**, because that was the only role with `REPLICATION`. So the
+credential that copies the database was the credential that owns it, and the
+rule admitting it admitted everything. On one machine with no published port the
+reach of that is small, which is why it lasted — but phase 1 ends with Postgres
+reachable from another host, and that rule is what would be waiting there.
+
+Now `db_replica`: `LOGIN REPLICATION NOSUPERUSER NOBYPASSRLS NOINHERIT`, no
+table grants, a member of nothing, with a password derived from the install
+secret like every other role's. And one rule that names it.
+
+Measured against a live install rather than reasoned about:
+
+| | |
+|---|---|
+| superuser, physical replication from the network | `FATAL: no pg_hba.conf entry for replication connection … user "dbadmin"` |
+| superuser, ordinary connection | unaffected |
+| `db_replica` reading a user table | `ERROR: permission denied for table …` |
+| `db_replica` running `IDENTIFY_SYSTEM` | answers |
+
+That third row is the point, and the first is the one that had to be checked
+rather than assumed: `host all all all` is in the image's default `pg_hba.conf`,
+and it is only because `all` in the database column does **not** match a
+physical replication request that removing the wide rule actually closes the
+door. Asserted in the suite against a live server, not inferred from the
+documentation.
+
+**The address stays `samenet`,** which is the subnets the server is directly
+attached to — inside a container, the docker network this engine made. Narrower
+than `all`; as narrow as it can be until a standby on another machine has an
+address worth naming, which is the rest of this phase.
+
+**The wide rule is deleted, not outranked.** `pg_hba` is first-match-wins, so
+leaving it below the narrow one would look like a narrowing and be none.
+
+**And `fox check` grew a `replication` line,** because of the upgrade path: that
+rule lives in the data directory, a routine `fox update` has no reason to
+rewrite it, and the only thing that does is another `ha enable`. An install
+whose HA was enabled by an older version keeps the wide rule, and nothing would
+have said so.
+
+#### What the rest needs, and why it is not here
+
+Two things, and they are not effort.
+
+**Two hosts that can reach each other.** The defining property of this phase is
+another machine, and the development environment has one VM. A second one is
+possible; a second one *that the first can reach* needs either `socket_vmnet`
+installed on the host or the VM's port forwarding rebound to a non-loopback
+address — a change to the developer's own machine, not to this repository. Until
+that exists, `node join`, the remote primary address and secret distribution
+can be written but not run, and every phase in this plan that went well went
+well because the mechanics were measured in a VM before the code was written.
+Three of the traps in phases 4 and 5 — a fatal setting on PostgreSQL 16, a
+backup that deleted its own data directory, a promotion that made the database
+unwritable — were found that way and by nothing else.
+
+**A decision about exposure.** A remote standby means Postgres listening beyond
+loopback for the first time. Today no engine port is published outside the VM
+on purpose: `internal/branch/branch.go` says a direct connection would bypass
+the gateway, its API key, TLS and ledger attribution. Publishing 5432 to a
+network is a deliberate reversal of that, and it is the reason TLS belongs in
+the same change rather than after it.
+
+TLS is also where key distribution stops being separable: a certificate the
+standby can verify has to reach the standby, which is the same problem as
+getting it the install secret. Designing the certificate story before deciding
+how secrets travel between nodes would mean building it twice.
 
 ### Phase 2 — shared state (medium)
 

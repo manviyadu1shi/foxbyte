@@ -125,20 +125,39 @@ func TestStandbyRunArgsArchive(t *testing.T) {
 	}
 }
 
-// The base backup is the command it has always been, verbatim, on an install
-// without the change feed.
+// The base backup on an install without the change feed, written out rather
+// than computed: this is what every install that does not stream changes runs,
+// and it is not to change because a feature that install does not have needed
+// something.
 //
-// The point of writing it out rather than computing it: this is what every
-// install that does not stream changes runs, and it is not to change because a
-// feature that install does not have needed something.
+// It did change once, in the commit that gave replication a role of its own,
+// and that is the distinction this test is here to hold. The feed must not
+// alter it. A credential that copies the database and cannot read it is a
+// different kind of reason, applies to every install, and is the point.
 func TestBaseBackupWithoutTheFeedIsUnchanged(t *testing.T) {
 	want := []string{
-		"pg_basebackup", "-h", "pg-main", "-U", pgUser, "-D", "/data/pgdata",
+		"pg_basebackup", "-h", "pg-main", "-U", ReplicationRole, "-D", "/data/pgdata",
 		"-R", "-X", "stream", "-c", "fast",
 	}
 	got := baseBackupArgs("pg-main", "/data/pgdata", false)
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("base backup arguments changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// Whichever shape it takes, the database is never copied by the role that owns
+// it. The superuser has REPLICATION too, so this is a choice rather than
+// something Postgres enforces, and the choice is the security property.
+func TestBaseBackupNeverConnectsAsTheSuperuser(t *testing.T) {
+	for _, conninfoDB := range []bool{false, true} {
+		got := strings.Join(baseBackupArgs("pg-main", "/data/pgdata", conninfoDB), " ")
+		if strings.Contains(got, pgUser) {
+			t.Errorf("conninfoDB=%v: the base backup connects as the superuser %q: %s",
+				conninfoDB, pgUser, got)
+		}
+		if !strings.Contains(got, ReplicationRole) {
+			t.Errorf("conninfoDB=%v: the base backup does not use %q: %s", conninfoDB, ReplicationRole, got)
+		}
 	}
 }
 
@@ -156,7 +175,7 @@ func TestBaseBackupWithoutTheFeedIsUnchanged(t *testing.T) {
 func TestBaseBackupNamesADatabaseAndNotASlot(t *testing.T) {
 	got := baseBackupArgs("pg-main", "/data/pgdata", true)
 	joined := strings.Join(got, " ")
-	for _, want := range []string{"dbname=" + pgDatabase, "host=pg-main", "user=" + pgUser, "-R", "-X stream"} {
+	for _, want := range []string{"dbname=" + pgDatabase, "host=pg-main", "user=" + ReplicationRole, "-R", "-X stream"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("base backup is missing %q\ngot: %s", want, joined)
 		}

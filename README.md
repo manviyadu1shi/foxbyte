@@ -405,6 +405,11 @@ newer one.
 
 **High availability**
 
+A standby streams from `main`, authenticating as `db_replica` — a role that can
+copy the database and read none of it — admitted by a single `pg_hba` rule
+naming it and this install's own network. `fox check` carries a **replication**
+line saying so.
+
 ```bash
 fox ha enable                   # hot standby streaming from main
 fox ha status
