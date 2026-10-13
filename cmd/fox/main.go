@@ -706,7 +706,7 @@ func branchCmd(args []string) {
 // haCmd dispatches `fox ha <subcommand>`.
 func haCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("usage: %s ha <enable|status|failover [--force]|disable|failback|sync on|sync off|drill>\n", brand.CLI)
+		fmt.Printf("usage: %s ha <enable|status|failover [--force]|disable|failback|sync on|sync off|drill|repair-roles>\n", brand.CLI)
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -726,10 +726,32 @@ func haCmd(args []string) {
 		haSyncCmd(args[1:])
 	case "drill":
 		haDrillCmd(args[1:])
+	case "repair-roles":
+		haRepairRolesCmd()
 	default:
 		fmt.Printf("unknown ha subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
+}
+
+// haRepairRolesCmd rewrites the role passwords inside the database to the ones
+// this install derives from its own secret.
+//
+// A promotion of a copy taken from another machine does this by itself; this is
+// the hand crank for when it could not — the warning it prints names this
+// command — and for a copy restored or moved by other means. It needs no
+// current password: psql reaches Postgres over the container's socket, which
+// the image's pg_hba trusts.
+func haRepairRolesCmd() {
+	touched, err := branch.RewriteRolePasswords("")
+	must(err)
+	if len(touched) == 0 {
+		fmt.Println("no role here is one this install manages, so nothing was changed.")
+		return
+	}
+	fmt.Printf("rewrote %d role password(s) to this install's own: %s\n",
+		len(touched), strings.Join(touched, ", "))
+	fmt.Println("clients authenticate at the gateway with an API key, so nothing they hold changes.")
 }
 
 // haSyncCmd is zero-data-loss mode: `on` makes every commit wait for the
@@ -1271,6 +1293,7 @@ func userCmd(args []string) {
 		if len(args) < 2 {
 			usage()
 		}
+		must(refuseIfAccountsAreACopy("a password changed"))
 		fmt.Print("new password (min 8 chars): ")
 		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		st := openStore()
@@ -1281,6 +1304,7 @@ func userCmd(args []string) {
 		if len(args) < 2 {
 			usage()
 		}
+		must(refuseIfAccountsAreACopy("an account deleted"))
 		s := openStore()
 		u, ok := s.UserByEmail(args[1])
 		if !ok {
@@ -1297,7 +1321,29 @@ func userCmd(args []string) {
 	}
 }
 
+// refuseIfAccountsAreACopy stops an account change on a machine that follows a
+// primary elsewhere.
+//
+// Such a machine's account store is a copy (HA plan phase 2): the primary ships
+// its accounts and this node applies them, replacing what is here. So an
+// account created here would vanish at the next copy, and — worse — a key
+// revoked here would come back. A security action that silently undoes itself
+// is the one kind of refusal worth being firm about, which is why reads are
+// untouched and every change is refused.
+func refuseIfAccountsAreACopy(what string) error {
+	if !branch.SharedStateIsACopy() {
+		return nil
+	}
+	return fmt.Errorf("this machine follows a primary elsewhere, so its accounts are a copy of that "+
+		"primary's — %s here would be undone by the next copy. Do it on the primary and it arrives "+
+		"here within seconds (`%s ha status` says how current this copy is)", what, brand.CLI)
+}
+
 func userCreate(email string) error {
+	// Said before the password is asked for rather than after it is typed.
+	if err := refuseIfAccountsAreACopy("an account made"); err != nil {
+		return err
+	}
 	fmt.Print("password (min 8 chars): ")
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	pw := strings.TrimSpace(line)
@@ -1326,6 +1372,7 @@ func apikeyCmd(args []string) {
 	}
 	switch args[0] {
 	case "create":
+		must(refuseIfAccountsAreACopy("a key minted"))
 		name := "key"
 		if len(args) > 2 {
 			name = args[2]
@@ -1349,6 +1396,10 @@ func apikeyCmd(args []string) {
 			fmt.Println("usage: fox apikey revoke <email> <id>")
 			os.Exit(2)
 		}
+		// Refused on a follower above all here: a key revoked on a copy comes
+		// back with the next one, so the person told it was revoked would be
+		// wrong about the one thing they most need to be right about.
+		must(refuseIfAccountsAreACopy("a key revoked"))
 		// An id that is not there says so: `fox apikey list <email>` shows the
 		// real ones. Printing "revoked" for a typo left the key working.
 		if err := s.RevokeKey(u.ID, args[2]); err != nil {

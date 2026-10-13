@@ -521,7 +521,7 @@ principle and it is not verified, so it is not claimed. `ha failback` on a
 joined machine means something different — rebuilding its *own* main — which is
 why a promotion clears the join rather than leaving the two to disagree.
 
-### Phase 2 — shared state (medium) — **investigated, not started; see 3.2**
+### Phase 2 — shared state (medium) — **done, the way 3.2 recommended**
 
 Accounts, API keys, change requests, pipelines and the realtime meter move out
 of per-node SQLite into a store every node can reach. Decide 3.2 here.
@@ -543,9 +543,53 @@ above.** Two findings:
    phase is the only one in the plan with no single-host value, so it follows
    phase 1 rather than preceding it.
 
-Still to decide: *which* store, now that `main` is out. A small Postgres that is
-itself replicated, the monitor node phase 3 introduces, or a consensus store —
-each with the operational cost §2 of this review named for a two-server shop.
+*Decided, and done:* **none of the three.** Each of them is a second thing to
+run, promote, back up and upgrade, and a two-server shop pays that cost
+forever. What the three options have in common is the assumption that the state
+has to move somewhere both nodes can *reach*. It does not. It has to **be** on
+both nodes — and there is already a channel that puts bytes on both nodes,
+authenticated, encrypted and watched: the WAL the standby is streaming.
+
+So: every node keeps its own SQLite, and the rows are carried. The node that
+follows nobody writes a document of the carried tables into `statedb`, a
+database of its own inside the replicated cluster; the other machine reads it
+from its own copy and applies it into its own store. Auth reads never leave the
+local file, so §3.2's property — logins work while `main` is down — is kept
+rather than traded away, which none of the three options manage.
+
+Seven tables travel (`users`, `api_keys`, `oauth_identities`, `branch_owners`,
+`pipelines`, `pipeline_targets`, `change_requests`). Three do not, each for a
+reason worth stating: `sessions`, because a bearer token is minutes old and
+carrying it between machines widens what a stolen document is worth;
+`pipeline_runs` and `realtime_activity`, because both are append-only logs that
+grow without bound and this mechanism rewrites a whole document when it
+changes; and `security_events`, because a hash chain is a per-writer structure
+— two chains cannot be merged, and overwriting one node's with another's would
+destroy the evidence the chain exists to keep. Each node keeps its own, which is
+the honest reading: the log records what *that* node did.
+
+One writer, enforced by the thing that already decides it: a node ships if and
+only if it follows nobody, and `ha failover` clears the join record, so a
+promotion makes a node the writer by the same act that makes it the primary. An
+account change on a follower is refused rather than silently overwritten —
+firmest for `apikey revoke`, since a key revoked on a copy comes back with the
+next one.
+
+**And the half this phase did not know it owned.** Phase 7 measured that a
+joined node cannot serve clients at all, because every role password is derived
+from the install secret and the copy carries the *other* install's roles. The
+accounts arriving is useless if the gateway cannot then log into Postgres. The
+decision taken was that the secret still never leaves the primary: a promoted
+node rewrites the role passwords to its own, over the container socket that
+needs no password. Clients are unaffected — they hold API keys, and the gateway
+derives the role password locally. `fox ha repair-roles` is the hand crank.
+
+**What is still not true.** The document is carried asynchronously, so a
+failover can lose the last seconds of account changes exactly as it can lose the
+last seconds of writes. And a standby that has *not* been promoted still cannot
+serve reads across machines: a copy in recovery cannot have its passwords
+rewritten, so that case needs a role created on the primary instead — which is
+the follow-up phase 7 named.
 
 ### Phase 3 — automatic failover with fencing (large) — **fencing done; the manager is a decision**
 
@@ -1039,8 +1083,12 @@ pitch is a tamper-evident record. Route B is a different product.
    joined standby has no licence at all and refuses paid features immediately —
    see 3.1. `node join` now warns. **Recommended: site licences for HA buyers**,
    the only option needing no new code.
-2. **Where shared state lives** (3.2) — *narrowed*: not main itself, for the
-   availability reason measured in 3.2. Which separate store is still open.
+2. **Where shared state lives** (3.2) — **decided and built.** Not main, for
+   the availability reason measured in 3.2, and not a separate store either:
+   each node keeps its own SQLite and the rows are carried between them through
+   the WAL already being replicated. The three options this section listed were
+   all a second thing to run; none of them kept the property that makes auth
+   survive `main` being down. See phase 2.
 3. **Failover manager** — `pg_auto_failover` or Patroni. *Narrowed by
    measurement:* `pg_auto_failover` is installable for PostgreSQL 18 in this
    engine's image (`postgresql-18-auto-failover 2.2-4.pgdg12+1`), but its last
