@@ -458,6 +458,27 @@ assert_eq "standby survives the reaper" "$(sudo docker inspect -f '{{.State.Stat
 assert_eq "ordinary branch is suspended" "$(sudo docker inspect -f '{{.State.Status}}' pg-rgn 2>/dev/null)" "exited"
 kill "$RP" 2>/dev/null
 $S branch delete rgn >/dev/null 2>&1
+
+# ---- zero-data-loss mode must not survive losing the standby (phase 5) -----
+#
+# `fox stop` removes every managed container, the standby among them, but ALTER
+# SYSTEM wrote synchronous_standby_names into main's postgresql.auto.conf and
+# that survives. So the engine came back up still waiting for a standby that no
+# longer existed -- and Init's own writes, the role sync and InstallLedger, are
+# commits. They would have waited for ever: `up` never returning, nothing on the
+# screen saying why, and the database unwritable.
+$S ha sync on >/dev/null 2>&1
+assert_eq "the mode is on before the standby goes" \
+  "$(pg pg-main "SELECT current_setting('synchronous_standby_names')")" "ANY 1 (fox_standby)"
+sudo docker rm -f pg-standby >/dev/null 2>&1
+timeout 240 "$S" up >/tmp/sync-restart.log 2>&1
+assert_eq "\`up\` returns instead of hanging on a commit nothing can satisfy" "$?" "0"
+assert_eq "…having cleared the setting before its first write" \
+  "$(pg pg-main "SELECT current_setting('synchronous_standby_names')")" ""
+assert_eq "…so a write completes" "$(pgt 15 pg-main "INSERT INTO pit VALUES (94) RETURNING 'ok'")" "ok"
+assert_eq "…and \`check\` says the mode was asked for but is not in effect" \
+  "$($S check 2>&1 | grep -c '^warn  durability')" "1"
+$S ha sync off >/dev/null 2>&1
 $S ha disable >/dev/null 2>&1
 
 echo "### 8. Blackbox (schema ledger, RECORD layer)"
