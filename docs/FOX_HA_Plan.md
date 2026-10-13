@@ -115,6 +115,42 @@ failover the new primary is running paid features on a licence activated for
 the old one — grace for 14 days, then refusal. The feature most likely to lapse
 is the one the customer is in the middle of needing.
 
+#### Measured once HA pairs worked, and both halves of that were wrong
+
+**A fingerprint mismatch never lapses.** The 14-day `Grace` applies to *expiry*
+alone. The mismatch branch of `internal/license/state.go` returns `Warning`,
+`Warning.Unlocks()` is true, and there is no deadline on it — the code says so
+in as many words: "A fingerprint that does not match warns and no more. A
+rebuilt VM, a replaced disk and a new laptop all land here, and none of them is
+a licence problem." So a licence copied from the old primary to the new one
+keeps working indefinitely.
+
+**But a joined standby has no licence at all, and that is worse.** A licence is
+per-install state — `~/.fox/license.json` — and `node join` copies the primary's
+*database*, not its state directory. A fresh standby node was never activated,
+so its status is the zero value `Invalid`, which does not unlock. Measured
+against a real enterprise build with the licence removed:
+
+```
+fox version            → enterprise edition, no licence active
+fox realtime enable …  → error: … no licence covers "realtime"
+```
+
+No grace, no warning period, immediate refusal.
+
+So the real failure is not "the licence lapses 14 days after a failover". It is:
+
+| After a cross-host failover | What actually happens |
+|---|---|
+| the standby was never activated — the default | paid features refuse **at once** |
+| `license.json` was copied across | works **indefinitely**, warning about the fingerprint |
+
+Which inverts the question. It is not "how do we stop the licence lapsing"; it
+is "how does the second machine come to have a licence at all" — and until now
+nothing told an operator that it did not. `fox node join` says so now, naming
+what promotion would cost and that a site licence covers both nodes. That part
+was engineering rather than policy. The policy below is still a decision.
+
 There is already an escape hatch: an empty fingerprint is a **site licence**
 ([license.go:59](../internal/license/license.go)). So this is a licensing
 *policy* decision HA forces, not new engineering:
@@ -124,6 +160,29 @@ There is already an escape hatch: an empty fingerprint is a **site licence**
 - require one licence per node and say so in the pricing.
 
 Decide this before the first HA customer, not during their first failover.
+
+**The recommendation, now that the measurements are in: site licences for
+anyone buying HA.** The other two options cost engineering that the first does
+not, and buy nothing a buyer asked for:
+
+- A *fingerprint set* means a new licence format, a new signing payload, and a
+  verifier that understands N machines. The format is signed, so extending it
+  touches `SigningPayload`, `cmd/licensesign`, and every licence already issued.
+- *One licence per node* is the only option with no engineering at all, but it
+  bills a customer twice for one database and makes the standby's licence an
+  operational step somebody can forget — which is exactly the failure the
+  warning above now has to exist for.
+- A *site licence* needs no code: an empty fingerprint already means this, the
+  50 evaluation licences already issued are site licences, and both nodes of a
+  pair are covered by the same file. The rebind allowance becomes moot, which
+  removes a support path rather than adding one.
+
+The argument against it is that a site licence is harder to meter — it does not
+pin the software to a machine. That is a real commercial consideration and it is
+the thing to weigh, but note that the rebind counter lives in `~/.fox` and
+`fox uninstall` removes it, which `internal/license` already documents as "a
+deterrent, not a proof". The node lock is not load-bearing today, so HA is not
+the thing that loosens it.
 
 ### 3.2 The shared-state move now carries the meter as well
 
@@ -919,7 +978,10 @@ pitch is a tamper-evident record. Route B is a different product.
    per-node. Blocks nothing technically; blocks the first sale. The 50
    evaluation licences already issued are site licences (empty fingerprint),
    so they would survive a failover; a customer licence issued the default way
-   would not.
+   would not. *Measured since:* a mismatched fingerprint never lapses, but a
+   joined standby has no licence at all and refuses paid features immediately —
+   see 3.1. `node join` now warns. **Recommended: site licences for HA buyers**,
+   the only option needing no new code.
 2. **Where shared state lives** (3.2) — *narrowed*: not main itself, for the
    availability reason measured in 3.2. Which separate store is still open.
 3. **Failover manager** — `pg_auto_failover` or Patroni. *Narrowed by

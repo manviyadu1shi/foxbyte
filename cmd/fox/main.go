@@ -871,6 +871,7 @@ func nodeCmd(args []string) {
 			os.Exit(2)
 		}
 		must(branch.NodeJoin(args[1]))
+		warnStandbyLicence()
 	case "leave":
 		must(branch.NodeLeave())
 	case "status":
@@ -886,6 +887,64 @@ func nodeCmd(args []string) {
 		fmt.Printf("unknown node subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
+}
+
+// warnStandbyLicence says what a standby node's licence will cost it on
+// promotion, because nothing else does and the moment it matters is the worst
+// moment to find out.
+func warnStandbyLicence() {
+	if w := standbyLicenceWarning(edition.Enterprise, license.Install()); w != "" {
+		fmt.Print(w)
+	}
+}
+
+// standbyLicenceWarning is what to say, given the edition and the licence this
+// install is honouring. A pure function of both, so the words can be read in a
+// test rather than only seen on a machine that has just joined one.
+//
+// Why it is needed at all: a licence is per-install state —
+// ~/.fox/license.json — and `node join` copies the primary's *database*, not
+// its state directory. So a machine that has just joined runs whatever licence
+// it was given itself, which on a fresh standby node is none. Measured, that is
+// not a grace period: a paid feature on an unlicensed enterprise build refuses
+// outright, "this build can run it, but no licence covers …". Promote that
+// machine and the paid features stop with it.
+//
+// And note what it deliberately does *not* warn about. A licence activated on
+// another machine and copied here keeps working indefinitely: a fingerprint
+// mismatch is a Warning in internal/license, Warning unlocks, and the 14-day
+// grace applies to expiry alone. So the dangerous state is an *absent* licence
+// rather than a mismatched one — the opposite of what docs/FOX_HA_Plan.md §3.1
+// assumed, which is why that section has been corrected.
+//
+// In cmd/fox rather than internal/branch: the engine has no business knowing
+// about licences, and internal/host already imports internal/branch, so
+// reaching the other way would be a cycle.
+func standbyLicenceWarning(enterprise bool, st license.Status) string {
+	if !enterprise {
+		return "" // a Standard build has no paid features to lose
+	}
+	if st.Unlocks() {
+		if st.State == license.Warning {
+			// It works, and will go on working after a promotion. Said anyway,
+			// because somebody reading this is deciding whether this machine is
+			// ready to be promoted.
+			return fmt.Sprintf("\nNote: this machine's licence warns — %s.\n"+
+				"It still unlocks the paid features, here and after a promotion.\n", st.Reason)
+		}
+		return ""
+	}
+	return fmt.Sprintf("\nWARNING: this machine has no licence that unlocks the paid features.\n\n"+
+		"  Replication and promotion do not need one, so the standby and `%s ha failover`\n"+
+		"  work regardless. But a licence is per-install state — joining copied the\n"+
+		"  primary's database, not its licence — so if this machine is promoted, the paid\n"+
+		"  features stop with it: the change feed, policy authoring, impact analysis,\n"+
+		"  change requests, pipelines, signed anchors and compliance export.\n\n"+
+		"  Not a grace period: an unlicensed enterprise build refuses them at once.\n\n"+
+		"  Activate a licence for this machine before you need it:\n"+
+		"    %s license activate <file>\n\n"+
+		"  A site licence (one with no machine fingerprint) covers every node of a pair,\n"+
+		"  which is what to ask for when buying HA.\n", brand.CLI, brand.CLI)
 }
 
 func must(err error) {
