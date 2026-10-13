@@ -373,6 +373,66 @@ echo "### 6. HA: replication + failover + failback"
 $S ha enable >/dev/null 2>&1; sleep 2
 assert_eq "standby is streaming" "$(pg pg-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
 
+# ---- reads from the standby (HA plan phase 7) ------------------------------
+#
+# The standby holds a complete, continuously updated copy and, between
+# failovers, answers nothing. A read-only session asks for it by name:
+# "main:standby" rather than "main". These assert the four things that make
+# that safe to offer -- the copy is current, it cannot be written to, the
+# reader is the same person there as on the primary, and the name grants
+# nothing the branch name would not.
+PGPASSWORD="$KEY" psql "$GATEWAY/main" -tAqc "CREATE TABLE IF NOT EXISTS roread(x int); INSERT INTO roread VALUES (7)" >/dev/null 2>&1
+sleep 2
+assert_eq "a read-only session is answered by the standby, which is in recovery" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'SELECT pg_is_in_recovery()' 2>&1 | head -1)" "t"
+assert_eq "…and carries the write the primary has just taken" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'SELECT x FROM roread' 2>&1 | head -1)" "7"
+assert_contains "…while a write there is refused by Postgres itself" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'INSERT INTO roread VALUES (8)' 2>&1 | head -1)" "read-only transaction"
+# The per-user role is cluster-wide and physically replicated, so attribution
+# on the copy is the same as on the primary rather than degrading to the shared
+# role -- which is what makes a read there interchangeable with a read here.
+assert_eq "…as the same person, not the shared role" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'SELECT session_user' 2>&1 | head -1)" "test@foxbyte.dev"
+# A branch of alice's, made here rather than borrowed from section 1d, which
+# deletes alice-dev when it is finished with it: a refusal about a branch that
+# no longer exists takes a different path and would prove nothing about this
+# one.
+# Asserted rather than assumed: a setup step that fails quietly turns the two
+# assertions below into assertions about nothing, which is how eight of them in
+# section 6b once ran as no-ops while the suite reported green.
+assert_eq "alice makes a branch, for the two assertions below" \
+  "$(code "$KA" -H 'Content-Type: application/json' -X POST -d '{"name":"roalice"}' https://localhost:8080/api/branches)" "201"
+assert_contains "a branch has no standby of its own, and is told so" \
+  "$(PGPASSWORD="$KA" psql "$GATEWAY/roalice:standby" -tAc 'SELECT 1' 2>&1 | head -1)" "only main has a standby"
+# The suffix chooses a backend; it is never a different thing to be allowed. An
+# account that may not open alice's branch may not open a copy of it either --
+# and the refusal names the branch rather than the key it asked for, because it
+# is the gateway's ordinary answer to a name somebody may not open, reached
+# before anything looked at the suffix.
+#
+# A third account, made here rather than borrowed: section 1d's bob is deleted
+# a few lines after it finishes with him (that deletion is one of its
+# assertions), and borrowing him made this pass against a dead credential
+# instead of against the ACL. The key is proved to work first for the same
+# reason -- "refused" is only interesting when the refusal is the one meant.
+printf 'password123\n' | $S user create roreader@foxbyte.dev >/dev/null 2>&1
+KRO="$($S apikey create roreader@foxbyte.dev it 2>/dev/null | grep -o 'key_[A-Za-z0-9_-]*')"
+assert_eq "…the account that tests this has a key that works" \
+  "$(PGPASSWORD="$KRO" psql "$GATEWAY/main" -tAc 'select 1' 2>&1 | head -1)" "1"
+assert_contains "…and a copy of a branch it may not open is refused the same way, naming no copy" \
+  "$(PGPASSWORD="$KRO" psql "$GATEWAY/roalice:standby" -tAc 'select 1' 2>&1 | head -1)" 'no branch "roalice"'
+$S user delete roreader@foxbyte.dev >/dev/null 2>&1
+curl -sk -o /dev/null -H "Authorization: Bearer $KA" -X DELETE https://localhost:8080/api/branches/roalice
+# Discoverable without reading the plan: the endpoint is printed where somebody
+# is already looking for a connection string, and `ha status` says how stale it
+# is, because staleness is the price of the feature rather than a fault in it.
+assert_eq "\`connect\` offers the read-only endpoint" \
+  "$($S connect main --dsn 2>/dev/null | grep -c 'main:standby')" "1"
+assert_eq "\`ha status\` says how far behind the copy is" \
+  "$($S ha status 2>/dev/null | grep -c 'behind the primary')" "1"
+# ---- end phase 7 -----------------------------------------------------------
+
 # ---- who may copy the database (HA plan phase 1) ---------------------------
 #
 # `ha enable` used to append `host replication all all` and let the standby
@@ -590,6 +650,14 @@ $S ha sync off >/dev/null 2>&1   # clear the intent, so nothing below waits
 
 W="$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -tAqc "INSERT INTO pit VALUES (99) RETURNING 'okwrite'" 2>&1 | head -1)"
 assert_eq "write succeeds via gateway after failover" "$W" "okwrite"
+# Phase 7, in the state that matters most: the standby is now the primary, so
+# there is no second copy. A read-only DSN that silently became a connection to
+# the primary would keep working, keep looking right, and put every read back
+# on the machine the reader was trying to spare.
+assert_contains "after a failover the read-only name is refused, not quietly served by the primary" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'SELECT 1' 2>&1 | head -1)" "was promoted"
+assert_contains "…and it names what rebuilds one" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'SELECT 1' 2>&1 | head -1)" "ha failback"
 # After a failover the promoted standby is the only primary: nothing may delete or stop it.
 for a in enable disable failover; do
   $S ha "$a" >/dev/null 2>&1
@@ -630,6 +698,11 @@ assert_eq "main is primary again (not in recovery)" "$(pg pg-main 'SELECT pg_is_
 assert_eq "primary pointer is back on main" "$(cat "$HOME/.fox/primary" 2>/dev/null)" "main"
 assert_eq "failback kept the post-failover write" "$(pg pg-main 'SELECT count(*) FROM pit WHERE id=99')" "1"
 assert_eq "old standby removed" "$(sudo docker ps -aq --filter 'name=^pg-standby$' | wc -l | tr -d ' ')" "0"
+# And with the standby gone, the read-only name says so rather than falling
+# back to the primary -- `ha failback` leaves no standby, which is the state an
+# operator is least likely to expect.
+assert_contains "after a failback there is no copy to read, and the refusal says which command makes one" \
+  "$(PGPASSWORD="$KEY" psql "$GATEWAY/main:standby" -tAc 'SELECT 1' 2>&1 | head -1)" "ha enable"
 W="$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -tAqc "INSERT INTO pit VALUES (100) RETURNING 'okwrite'" 2>&1 | head -1)"
 assert_eq "gateway writes to main after failback" "$W" "okwrite"
 pg pg-main "SELECT pg_switch_wal()" >/dev/null; sleep 5

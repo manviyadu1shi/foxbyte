@@ -437,6 +437,8 @@ func HAStatus() error {
 		fmt.Println("replication is asynchronous: commits never wait, and a lost machine costs")
 		fmt.Println("up to archive_timeout (60s) of writes. `fox ha sync on` trades the first for the second.")
 	}
+	fmt.Println("=== reads ===")
+	fmt.Println(DescribeStandbyReads())
 	fmt.Println("=== primary: connected standbys (pg_stat_replication) ===")
 	_ = run("docker", "exec", "--env-file", pgEnvFile(), PrimaryContainer(),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-x", "-c",

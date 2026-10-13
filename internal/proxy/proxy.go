@@ -324,6 +324,12 @@ func handle(client net.Conn) {
 	if target == "" {
 		target = "main"
 	}
+	// A session asks for the standby's copy by name: "main:standby" rather than
+	// "main" (HA plan phase 7). Resolved before anything else looks at the
+	// name, so the ACL, a key's scope, the audit record and the per-user role
+	// are all about the branch — a suffix is a choice of backend, never a
+	// different thing to be allowed.
+	target, standbyRead := branch.SplitReadTarget(target)
 	// A branch-scoped key (an agent's) opens its own branch and nothing else.
 	// Checked before the branch is touched, so such a key cannot even wake
 	// another branch, and the actor recorded is the agent, not the key's owner.
@@ -342,14 +348,36 @@ func handle(client net.Conn) {
 		return
 	}
 	touch(target)
-	if st := branch.ContainerState(target); st != "running" && st != "absent" {
-		log.Printf("auto-resume: waking %s (was %s)", target, st)
-	}
-	addr, err := branch.EnsureRunning(target) // resumes the branch if suspended
-	if err != nil {
-		log.Printf("route dbname=%q: %v", target, err)
-		sendError(client, "3D000", err.Error()) // invalid_catalog_name
-		return
+	var addr string
+	if standbyRead {
+		// Never EnsureRunning: the standby is not a branch, nothing may start
+		// it on a client's behalf, and a stepped-down primary must not be
+		// revived by somebody opening a read-only session.
+		a, err := branch.StandbyReadAddr(target)
+		if err != nil {
+			log.Printf("route dbname=%q: %v", branch.StandbyReadName(target), err)
+			// A refusal that retrying cannot change is a name problem; one
+			// that waiting can — a standby mid-rebuild, or promoted and not
+			// yet failed back — tells the client to come back instead.
+			code := "57P03" // cannot_connect_now
+			if errors.Is(err, branch.ErrNoStandbyRead) {
+				code = "3D000" // invalid_catalog_name
+			}
+			sendError(client, code, err.Error())
+			return
+		}
+		addr = a
+	} else {
+		if st := branch.ContainerState(target); st != "running" && st != "absent" {
+			log.Printf("auto-resume: waking %s (was %s)", target, st)
+		}
+		a, err := branch.EnsureRunning(target) // resumes the branch if suspended
+		if err != nil {
+			log.Printf("route dbname=%q: %v", target, err)
+			sendError(client, "3D000", err.Error()) // invalid_catalog_name
+			return
+		}
+		addr = a
 	}
 	backend, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -380,6 +408,13 @@ func handle(client net.Conn) {
 	case actor != "":
 		if err := branch.EnsureUserRole(target, actor); err != nil {
 			log.Printf("per-user role %q on %s: %v (using %s)", actor, target, err, realUser)
+		} else if standbyRead && !branch.StandbyKnowsRole(actor) {
+			// The role was created on the primary a moment ago and the copy has
+			// not replayed it yet. The shared role costs attribution and
+			// nothing else here: this session cannot write, so it has nothing
+			// to be attributed for, and the alternative is refusing a
+			// connection over a catalogue change that lands in milliseconds.
+			log.Printf("standby read: role %q not replayed yet (using %s)", actor, realUser)
 		} else {
 			loginUser, backendPass = actor, branch.UserRolePassword(actor)
 		}
