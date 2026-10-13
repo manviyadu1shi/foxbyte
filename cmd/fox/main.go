@@ -811,13 +811,16 @@ func haDrillCmd(args []string) {
 // network. Everything else keeps it off one on purpose.
 func nodeCmd(args []string) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Printf("usage: %s node <expose --address A --peer B [--port N] | unexpose | status | token>\n\n"+
+		fmt.Printf("usage: %s node <expose --address A --peer B [--port N] | unexpose | join <token> | leave | status | token>\n\n"+
 			"expose     publish this primary for a standby on another machine: TLS with a\n"+
 			"           certificate that names --address, admitting only the %s role and\n"+
 			"           only from --peer. Restarts main, because a published port is fixed\n"+
 			"           when the container is made.\n"+
 			"unexpose   take it back off the network.\n"+
-			"status     what is published, if anything.\n"+
+			"join       on the other machine: become a standby of the primary a token\n"+
+			"           describes, copying it over TLS and verifying its certificate.\n"+
+			"leave      stop following it; the standby and its copy are removed.\n"+
+			"status     what is published or followed, if anything.\n"+
 			"token      print the join token again, for the other machine.\n",
 			brand.CLI, branch.ReplicationRole)
 		return
@@ -854,7 +857,24 @@ func nodeCmd(args []string) {
 		must(branch.NodeExpose(addr, peer, port))
 	case "unexpose":
 		must(branch.NodeUnexpose())
+	case "join":
+		if len(args) < 2 {
+			fmt.Printf("usage: %s node join <token>\n\n"+
+				"The token comes from `%s node expose` on the primary. It carries that\n"+
+				"install's CA certificate, its address, and the %s password — and nothing\n"+
+				"else, so this machine cannot derive any other role's credentials.\n\n"+
+				"This machine's own 'main' is left alone and sits idle while it follows\n"+
+				"the other primary. Re-running this rebuilds the standby from scratch.\n",
+				brand.CLI, brand.CLI, branch.ReplicationRole)
+			os.Exit(2)
+		}
+		must(branch.NodeJoin(args[1]))
+	case "leave":
+		must(branch.NodeLeave())
 	case "status":
+		if d := branch.DescribeJoin(); d != "" {
+			fmt.Println(d)
+		}
 		fmt.Println(branch.DescribeExposure())
 	case "token":
 		tok, err := branch.JoinToken()

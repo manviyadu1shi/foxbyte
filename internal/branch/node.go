@@ -417,11 +417,11 @@ func ParseJoinToken(tok string) (joinPayload, error) {
 			"the two installs are different releases", p.Version, brand.CLI)
 	}
 	for what, v := range map[string]string{
-		"an address":       p.Address,
-		"a role":           p.Role,
-		"a password":       p.Password,
-		"a CA certificate": p.CACert,
-		"a database name":  p.Database,
+		"address":        p.Address,
+		"role":           p.Role,
+		"password":       p.Password,
+		"CA certificate": p.CACert,
+		"database name":  p.Database,
 	} {
 		if strings.TrimSpace(v) == "" {
 			return p, fmt.Errorf("this join token carries no %s", what)

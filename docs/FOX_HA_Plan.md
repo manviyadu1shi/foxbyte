@@ -258,16 +258,16 @@ call under a ten-minute deadline. `fox backup target show` does that.
 bucket for an operator. The check now tells every install that its backups are
 one disk failure from gone; acting on it is theirs.
 
-### Phase 1 — a standby on another machine (large) — **started: the role, TLS and exposure**
+### Phase 1 — a standby on another machine (large) — **done**
 
 | | |
 |---|---|
 | A dedicated replication role rather than widening `allowReplication` | **done** |
 | TLS on replication traffic | **done** — `fox node expose`, with a per-install CA |
 | Publishing Postgres off the machine at all | **done** — opt-in, TLS-required, one address, one role, one peer |
-| `fox node join <primary>` — a second install builds its standby over the network | **next** |
+| `fox node join <primary>` — a second install builds its standby over the network | **done** |
 | Distribute the install secret and signing keys to each node | **decided and narrowed** — see the join token below |
-| `standbyRunArgs` grows a remote primary address | **next**, with `node join` |
+| `standbyRunArgs` grows a remote primary address | **done** |
 
 Unlocks: survives losing a machine. Everything after this depends on it.
 
@@ -391,20 +391,60 @@ derive that password if it is ever rotated, so a rotation means re-issuing the
 token. That is the right side of the trade — a rotation is rare, and a superuser
 credential on a second machine is forever.
 
-#### What the rest needs, and why it is not here
+#### `fox node join` — and the promise, demonstrated
 
-Two things, and they are not effort.
+On the other machine: take the token, copy the primary over TLS, run the copy as
+a standby. What it reuses is the point. The promotion, the failover refusals,
+slot synchronisation, zero-data-loss mode and the drill all work on a standby
+whose primary is across a network exactly as they do on one whose primary is
+the container beside it. Two things differ: where the base backup comes from,
+and that the walreceiver has a certificate to verify.
 
-**`fox node join` is next**, and it is the one that makes the phase's promise
-true. What remains is the node-2 side: take a token, build a standby from the
-primary over the network, and run it — which means `standbyRunArgs` growing a
-remote primary address and a mount for the CA certificate, since
-`primary_conninfo` carries `sslrootcert` as an **in-container** path (measured).
+Confirmed in `pg_stat_wal_receiver` on the second machine: `sslmode=verify-full`,
+`sslrootcert=/fox-tls/ca.crt`, `status=streaming`. And on the first,
+`pg_stat_replication` showing `fox_standby | 192.168.105.3 | streaming`.
 
-**What two VMs still do not prove.** They share a kernel, a disk and a power
-supply. This proves the networking, the credentials and the TLS path; it does
-not prove surviving the loss of a host, and the drill report's "what this did
-not test" section goes on saying so.
+**The promise, measured rather than claimed.** Rows 1, 42 and 99 written on the
+primary — 99 seconds before the end. The primary's database killed with SIGKILL.
+`fox ha failover` on the surviving machine. It took a write, and held
+`1 42 99 100`: nothing acknowledged was lost, and `pg_is_in_recovery()` was
+false. That is "survives losing a machine", on two machines.
+
+**This install's own `main` is idle afterwards**, which is honest rather than
+elegant: a node hosting a standby of another install is a standby node. It is
+also what makes the change additive — no existing path changes meaning.
+
+#### Three sharp edges the live testing found
+
+**A promoted standby still claimed to follow its old primary.** After the
+failover the surviving machine held the only copy of the data while its state
+said it was a copy of something else — and the guards built on that state then
+refused the *right* operations, `ha enable` among them. A promotion clears the
+join now and says so: "it is the primary now, holding every write that reached
+it."
+
+**`ha enable` would have rebuilt a remote standby from the local main.** Same
+container, same storage — so a machine following another primary would quietly
+stop being a copy of anything that mattered. It refuses, and names `node leave`.
+
+**The CA path has to be one constant.** `pg_basebackup -R` records `sslrootcert`
+as the path it saw during the copy, and the walreceiver reads that path from
+inside the standby container later. Give the backup a host path and the standby
+verifies nothing. One constant, and a test.
+
+#### What two VMs still do not prove
+
+They share a kernel, a disk and a power supply. This establishes the networking,
+the credentials, the TLS path and the promotion — not survival of a power cut,
+and the drill report's "what this did not test" section goes on saying so until
+there is hardware to say otherwise.
+
+**Cross-host failback is not built.** After a failover the surviving machine is
+the primary; giving the role back to the original means that machine joining
+this one and failing over again. `node join` and `ha failover` support that in
+principle and it is not verified, so it is not claimed. `ha failback` on a
+joined machine means something different — rebuilding its *own* main — which is
+why a promotion clears the join rather than leaving the two to disagree.
 
 ### Phase 2 — shared state (medium) — **investigated, not started; see 3.2**
 
@@ -678,7 +718,7 @@ additionally wait for replay — read-your-writes on the standby, at more latenc
 Unlocks: RPO of zero inside the data centre. Phase 1 is what makes the quorum
 form mean what the plan originally claimed.
 
-### Phase 6 — DR site and drills — **the drill is done; the site waits on phase 1**
+### Phase 6 — DR site and drills — **the drill is done; the site is now possible**
 
 The plan said it itself: "the drill is the deliverable, not the standby". The
 drill is built. The second site is not, and cannot be — an asynchronous standby
@@ -690,7 +730,7 @@ order its own dependencies allow:
 |---|---|
 | A scripted drill that measures and reports real RPO and RTO | **done** |
 | The WAL archive at a second site with retention | **already possible** — a remote S3 target with Object Lock, which `fox backup target set` has supported since before this plan, and `fox check` has warned about since phase 0. Configuration, not code |
-| An asynchronous standby at the second site | **blocked on phase 1** |
+| An asynchronous standby at the second site | **unblocked**: phase 1 landed `node expose` and `node join`, so a standby at another site is a `node join` from there |
 
 #### `fox ha drill --yes`
 

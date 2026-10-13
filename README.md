@@ -419,7 +419,8 @@ fox ha failback                 # after a failover: back to main's own container
 fox ha sync on | off            # zero data loss: a commit waits for the standby
 fox ha drill --yes              # kill the primary for real, and report what it cost
 fox node expose --address A --peer B --yes   # let a standby on another machine copy this one
-fox node unexpose | status | token
+fox node join <token>           # on the other machine: become its standby
+fox node unexpose | leave | status | token
 ```
 
 `fox node expose` is the only thing that puts Postgres on a network, and it is
@@ -428,6 +429,12 @@ certificate that standby verifies, admitting only `db_replica` — which can cop
 the database and read none of it — and only from the one peer address. The join
 token it prints carries that CA and that role's password, and deliberately not
 the install secret. `fox check` reports the exposure on every run.
+
+On the second machine, `fox node join <token>` copies that primary over TLS and
+runs the copy as a standby, verifying the primary's certificate. Everything else
+then works as it does on one machine: `fox ha status` shows how far behind it is,
+`fox ha failover` promotes it, and `fox ha drill` measures what a failover costs.
+That machine's own `main` sits idle while it follows another primary.
 
 Replication is asynchronous by default: commits never wait, and losing the
 machine costs up to a minute of writes (`archive_timeout=60`). `fox ha sync on`

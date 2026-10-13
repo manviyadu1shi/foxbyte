@@ -4,6 +4,7 @@ package branch
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -288,6 +289,12 @@ func standbyRunArgs(dataPath string) []string {
 		"-e", "PGDATA=/var/lib/postgresql/data/pgdata",
 		"-v", dataPath + ":/var/lib/postgresql/data",
 	}
+	// Following a primary on another machine: the certificate its walreceiver
+	// verifies, at the path primary_conninfo names. pg_basebackup -R recorded
+	// sslrootcert as the path it saw during the copy, read later from inside
+	// this container — so the two have to agree, and they do by using one
+	// constant (nodejoin.go).
+	args = append(args, joinedMount()...)
 	// The standby streams from the primary and archives WAL after a failover, so
 	// it is long-lived and must come back on its own like main (see restartPolicy).
 	args = append(args, restartPolicy...)
@@ -323,6 +330,16 @@ func HAEnable() error {
 	primary := PrimaryContainer()
 	if err := haGuard("enable", primary); err != nil {
 		return err
+	}
+	// A standby of this install's own main and a standby of another install's
+	// are the same container and the same storage. This would rebuild the
+	// second from the first without saying so, and the machine would quietly
+	// stop being a copy of anything that matters.
+	if j, ok := CurrentJoin(); ok {
+		return fmt.Errorf("this machine is a standby of %s:%d, and that standby is this container.\n"+
+			"`%s ha enable` would rebuild it from this install's own main instead.\n"+
+			"Run `%s node leave` first if this machine should stop following %s",
+			j.Address, j.Port, brand.CLI, brand.CLI, j.Address)
 	}
 
 	// 1. Allow replication connections on the primary, then reload.
@@ -403,6 +420,10 @@ func HAStatus() error {
 		fmt.Println("standby exists but is not running. Rebuild it with: foxbyte ha enable")
 		return nil
 	}
+	if d := DescribeJoin(); d != "" {
+		fmt.Printf("=== this machine ===\n%s\n", d)
+		fmt.Printf("its own 'main' is idle while it follows that primary\n")
+	}
 	fmt.Println("=== durability ===")
 	switch {
 	case SyncActive() && syncQuorumMet():
@@ -444,6 +465,25 @@ func HAFailover() error {
 	quiet("docker", "stop", old) // the old primary steps down
 	if err := setPrimary("standby"); err != nil {
 		return err
+	}
+	// A promoted standby follows nobody: it is the primary now.
+	//
+	// Leaving the join behind would be a machine that holds the only copy of
+	// the data while claiming to be a copy of something else — and the guards
+	// built on that state would then refuse the right operations. `ha enable`
+	// would refuse to give it a standby, and `node leave` would refuse to let
+	// go of a primary it no longer follows. Cleared here, because a promotion
+	// is exactly the moment it stops being true.
+	if j, ok := CurrentJoin(); ok {
+		if err := os.Remove(joinedPath()); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("\nWARNING: this machine was promoted but still records %s:%d as its primary (%v).\n"+
+				"Remove %s by hand, or `%s ha enable` will refuse to give it a standby.\n\n",
+				j.Address, j.Port, err, joinedPath(), brand.CLI)
+		} else {
+			fmt.Printf("this machine no longer follows %s:%d — it is the primary now, holding every\n"+
+				"write that reached it. Give it a standby with `%s ha enable`, or let the old\n"+
+				"primary join this one.\n", j.Address, j.Port, brand.CLI)
+		}
 	}
 	// Zero-data-loss mode does not survive the promotion, and must not.
 	//
