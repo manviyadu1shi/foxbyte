@@ -325,6 +325,7 @@ export type License = {
   features: Feature[]
   reason: string                                     // empty when there is nothing wrong
   action: string                                     // what would fix it
+  you_are_admin?: boolean                            // may this viewer activate one (absent on an older engine)
   expires?: string                                   // RFC 3339
   id?: string
   customer?: string
@@ -337,9 +338,9 @@ export type License = {
 export const getLicense = () => req('GET', `${API}/api/license`) as Promise<License>
 
 // What came back from activating one. `notes` is what is still left to do and
-// is empty when there is nothing — the Gateway and Agent API read the
-// entitlement at startup, and on macOS or Windows only the VM's copy was
-// written.
+// is empty when there is nothing. Every engine process now picks a licence up by
+// itself, so the one note left is for macOS and Windows: only the VM's copy was
+// written, and the host keeps its own at the next `fox start`.
 export type LicenseActivation = {
   activated: string
   customer: string

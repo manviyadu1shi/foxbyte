@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { activateLicense, getLicense, type License, type LicenseActivation } from '../api'
 import { BRAND } from '../brand'
+import { refreshEntitlement } from '../features'
 
 // Activating a licence, from the console.
 //
@@ -36,6 +37,9 @@ export default function LicensePage() {
       setDone(r)
       setText('')
       await load()
+      // The badge at the top and any lock elsewhere on screen read the
+      // entitlement too, and should not need a reload to agree with this page.
+      refreshEntitlement()
     } catch (e) {
       setErr((e as Error).message)
     } finally {

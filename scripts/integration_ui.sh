@@ -108,14 +108,37 @@ npx --yes playwright install --with-deps chromium >/dev/null 2>&1 || {
 	echo "could not install Chromium"; exit 1; }
 
 echo "### the console's smoke tests"
+# A retry in the log is expected in CI and is not the console misbehaving: the
+# engine's short-lived containers change the host's network interfaces, and
+# Chromium aborts requests in flight when they do. web/playwright.config.ts
+# has the detail. A test that fails twice running is a real failure.
+#
+# This comment used to sit *inside* the command below, after a line ending in a
+# backslash. Bash ends a command at a `#`, so the first line's FOX_E2E_URL,
+# FOX_E2E_EMAIL and FOX_E2E_PASSWORD were set as shell variables and never
+# reached Playwright — which went on working only because its defaults happen
+# to be the same values. A FOX_API_URL pointing anywhere else was ignored.
 FOX_E2E_URL="$API" FOX_E2E_EMAIL="$EMAIL" FOX_E2E_PASSWORD="$PASSWORD" \
-	# A retry in the log is expected in CI and is not the console misbehaving: the
-	# engine's short-lived containers change the host's network interfaces, and
-	# Chromium aborts requests in flight when they do. web/playwright.config.ts
-	# has the detail. A test that fails twice running is a real failure.
 	FOX_E2E_BRANCH="$BRANCH" FOX_E2E_NEW_BRANCH="$NEW_BRANCH" FOX_E2E_TABLE="$TABLE" \
-	FOX_E2E_TARGET_BRANCH="$TARGET_BRANCH" FOX_E2E_RT_BRANCH="$BRANCH" npx playwright test
+	FOX_E2E_TARGET_BRANCH="$TARGET_BRANCH" FOX_E2E_RT_BRANCH="$BRANCH" \
+	npx playwright test --grep-invert "licence file uploaded"
 rc=$?
+
+# Upgrading needs a starting point with no licence, and every spec above needs
+# one — so it runs last, on its own, with the licence taken away first and put
+# back afterwards whatever happened. Taken away with the engine left running:
+# that the console then shows Standard, and unlocks after the modal with no
+# restart in between, is half of what it checks.
+echo "### upgrading to Enterprise in the console"
+LICENCE="${S}.licence.json"   # written by scripts/build_test_fox.sh beside the binary
+"$S" admin grant "$EMAIL" >/dev/null 2>&1   # only an admin is offered Upgrade
+"$S" license remove >/dev/null 2>&1
+sleep 4   # the engine notices within a few seconds (license.Watch)
+FOX_E2E_URL="$API" FOX_E2E_EMAIL="$EMAIL" FOX_E2E_PASSWORD="$PASSWORD" FOX_E2E_LICENCE="$LICENCE" \
+	npx playwright test --grep "licence file uploaded"
+urc=$?
+"$S" license activate "$LICENCE" >/dev/null 2>&1   # back, for whatever runs next
+[ "$rc" = 0 ] && rc=$urc
 
 echo "### cleanup"
 # Realtime is an engine-wide setting, so it is turned off again: a later suite
