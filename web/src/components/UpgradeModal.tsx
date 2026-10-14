@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { useEffect, useId, useRef, useState, type DragEvent } from 'react'
-import { activateLicense, type License, type LicenseActivation } from '../api'
+import { activateLicense, getEditionSwitch, startEditionSwitch, type EditionSwitch, type License, type LicenseActivation } from '../api'
 import { BRAND } from '../brand'
+import { refreshEntitlement } from '../features'
 
 // Upgrading to Enterprise, from wherever somebody happens to be.
 //
@@ -197,33 +198,176 @@ function StatusMark({ outcome }: { outcome: Outcome }) {
   )
 }
 
+/**
+ * A command to run, with a button that copies it. Long ones wrap rather than
+ * run off the edge. The clipboard can refuse (an older browser, a page not
+ * served over HTTPS), so the text is then selected for a manual copy instead.
+ */
+function Cmd({ text }: { text: string }) {
+  // 'selected' says what to do next, so a refused clipboard does not look like
+  // a button that did nothing.
+  const [state, setState] = useState<'idle' | 'copied' | 'selected'>('idle')
+  const ref = useRef<HTMLElement>(null)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setState('copied')
+    } catch {
+      const sel = window.getSelection()
+      if (sel && ref.current) {
+        const r = document.createRange()
+        r.selectNodeContents(ref.current)
+        sel.removeAllRanges()
+        sel.addRange(r)
+      }
+      setState('selected')
+    }
+    setTimeout(() => setState('idle'), 2500)
+  }
+  const keys = /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘C' : 'Ctrl+C'
+  return (
+    <pre className="cmd">
+      <code ref={ref}>{text}</code>
+      <button type="button" className="copy" onClick={copy} aria-label={`Copy: ${text}`}>
+        {state === 'copied' ? 'copied' : state === 'selected' ? `press ${keys}` : 'copy'}
+      </button>
+    </pre>
+  )
+}
+
+// Where the Enterprise licence is published. The free build carries the
+// address and nothing from enterprise/ itself.
+const enterpriseLicenseURL = `https://github.com/${BRAND.repo}/blob/main/enterprise/LICENSE`
+
+// How often a running switch is asked about. Answers stop for a few seconds
+// while the servers restart onto the new edition; that is expected, not failure.
+const switchPollMs = 2000
+
 function StandardBuild({ titleId, onClose }: { titleId: string; onClose: () => void }) {
+  const upgrade = `${BRAND.cli} upgrade --edition enterprise`
   const unix = `curl -fsSL https://raw.githubusercontent.com/${BRAND.repo}/main/deploy/install.sh | ${BRAND.envPrefix}EDITION=enterprise sh`
   const win = `$env:${BRAND.envPrefix}EDITION = 'enterprise'; irm https://raw.githubusercontent.com/${BRAND.repo}/main/deploy/install.ps1 | iex`
+  const [accepted, setAccepted] = useState(false)
+  const [sw, setSw] = useState<EditionSwitch | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+  const [err, setErr] = useState('')
+
+  // Opened again while a switch runs: carry on showing it.
+  useEffect(() => {
+    getEditionSwitch().then(s => { if (s.state === 'running') setSw(s) }).catch(() => { /* not an admin, or an older engine */ })
+  }, [])
+
+  // While it runs, ask how it is going. When it is done, every lock on the page
+  // asks again — and this page, now on an Enterprise engine, turns this modal
+  // into the licence form by itself.
+  useEffect(() => {
+    if (sw?.state !== 'running') return
+    const id = setInterval(async () => {
+      try {
+        const s = await getEditionSwitch()
+        setRestarting(false)
+        setSw(s)
+        if (s.state === 'done') refreshEntitlement()
+      } catch {
+        setRestarting(true)
+      }
+    }, switchPollMs)
+    return () => clearInterval(id)
+  }, [sw?.state])
+
+  const install = async () => {
+    setStarting(true)
+    setErr('')
+    try {
+      await startEditionSwitch('enterprise', true)
+      setSw({ state: 'running', edition: 'enterprise', log: [] })
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  if (sw && sw.state !== 'none') {
+    return (
+      <>
+        <h3 id={titleId}>Installing {BRAND.product} Enterprise</h3>
+        {sw.state === 'running' && (
+          <p className="modal-body" role="status">
+            <span className="spinner" aria-hidden />
+            {restarting
+              ? 'The servers are restarting onto the Enterprise edition…'
+              : 'Downloading the signed Enterprise build and checking it. The servers restart for a few seconds; your data is not touched.'}
+          </p>
+        )}
+        {sw.state === 'done' && (
+          <p className="modal-body" role="status">Enterprise is installed. Opening licence activation…</p>
+        )}
+        {sw.state === 'failed' && (
+          <>
+            <p className="err" role="alert">{sw.error || 'The switch did not finish.'}</p>
+            <p className="modal-body">
+              You can also run it from a terminal, which shows every step:
+            </p>
+            <Cmd text={upgrade} />
+          </>
+        )}
+        {!!sw.log?.length && <pre className="switch-log"><code>{sw.log.join('\n')}</code></pre>}
+        <p className="modal-note">
+          On macOS and Windows, <code>{BRAND.cli}</code> on your computer updates itself to match the next
+          time you run it.
+        </p>
+        <div className="modal-actions">
+          <button className="primary" onClick={onClose} autoFocus>Close</button>
+        </div>
+      </>
+    )
+  }
+
   return (
     <>
       <h3 id={titleId}>Moving to {BRAND.product} Enterprise</h3>
       <p className="modal-body">
         This is the standard edition, and a licence cannot change that: the paid features are not
-        in this build at all, which is what keeps it free to share. Install the Enterprise build
-        over it. That replaces the <code>{BRAND.cli}</code> program and nothing else, so your
-        databases, accounts and settings stay where they are.
+        in this build at all, which is what keeps it free to share. Install the Enterprise build of
+        the same version over it. That replaces the <code>{BRAND.cli}</code> program and nothing else,
+        so your databases, accounts and settings stay where they are.
       </p>
-      <p className="modal-body"><b>1. Install it</b> — macOS and Linux:</p>
-      <pre className="cmd"><code>{unix}</code></pre>
-      <p className="modal-body">Windows (PowerShell):</p>
-      <pre className="cmd"><code>{win}</code></pre>
-      <p className="modal-body">
-        <b>2. Restart onto it</b> — the running engine keeps the old program until it stops:
-        {' '}<code>{BRAND.cli} stop</code>, then <code>{BRAND.cli} setup</code> on macOS or Windows (which also
-        puts the Enterprise engine into the VM), or <code>sudo {BRAND.cli} start</code> on Linux.
-      </p>
-      <p className="modal-body">
-        <b>3. Come back here</b> and choose Upgrade again to activate your licence.
-      </p>
+      <label className="accept">
+        <input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)} disabled={starting}
+          aria-label={`I accept the ${BRAND.product} Enterprise License`} />
+        <span>
+          I accept the{' '}
+          <a href={enterpriseLicenseURL} target="_blank" rel="noreferrer">{BRAND.product} Enterprise License</a>.
+          {' '}It is not open source, and its paid features need a licence key, which you activate next.
+        </span>
+      </label>
+      {err && <p className="err" role="alert">{err}</p>}
       <div className="modal-actions">
-        <button className="primary" onClick={onClose} autoFocus>Close</button>
+        <button className="ghost" onClick={onClose} disabled={starting}>Cancel</button>
+        <button className="primary" onClick={install} disabled={!accepted || starting}>
+          {starting ? <><span className="spinner" aria-hidden />Starting…</> : 'Install Enterprise'}
+        </button>
       </div>
+      <details className="modal-more">
+        <summary>Or install it from a terminal</summary>
+        <p className="modal-body">
+          On the computer where {BRAND.product} is installed (on Linux, put <code>sudo</code> in front):
+        </p>
+        <Cmd text={upgrade} />
+        <p className="modal-body">
+          If it says “unknown command: upgrade”, your <code>{BRAND.cli}</code> is older than that command:
+          run <code>{BRAND.cli} update</code> first, or use the installer — macOS and Linux:
+        </p>
+        <Cmd text={unix} />
+        <p className="modal-body">Windows (PowerShell):</p>
+        <Cmd text={win} />
+        <p className="modal-body">
+          Then restart onto it: <code>{BRAND.cli} stop</code> and <code>{BRAND.cli} setup</code> on macOS or
+          Windows, or <code>sudo {BRAND.cli} start</code> on Linux.
+        </p>
+      </details>
     </>
   )
 }

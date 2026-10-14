@@ -4,7 +4,7 @@
 
 export const BRAND = {
   product: "FoxByte",
-  tagline: "the database that branches like code",
+  tagline: "every schema change on record, every row change live",
   cli: "fox",
   slug: "foxbyte",
   envPrefix: "FOX_",

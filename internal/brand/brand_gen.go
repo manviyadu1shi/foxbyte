@@ -8,7 +8,7 @@ const (
 	// Product is the name people read.
 	Product = "FoxByte"
 	// Tagline follows the product name in titles.
-	Tagline = "the database that branches like code"
+	Tagline = "every schema change on record, every row change live"
 	// CLI is the command, and the name of the binary.
 	CLI = "fox"
 	// Slug is the product name in lowercase, for identifiers that are not

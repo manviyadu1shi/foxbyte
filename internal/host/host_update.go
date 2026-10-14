@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thefoxbyte/foxbyte/internal/brand"
 	"github.com/thefoxbyte/foxbyte/internal/update"
 	"github.com/thefoxbyte/foxbyte/internal/version"
 )
@@ -24,7 +25,18 @@ type UpdateOptions struct {
 	Check   bool   // only report whether a newer release exists
 	Yes     bool   // don't ask for confirmation
 	Version string // install this release instead of the newest
+
+	// Edition and AcceptLicense are `fox upgrade`'s: install the other edition
+	// of the version already installed. Empty for `fox update`, which always
+	// stays in its own edition.
+	Edition       string
+	AcceptLicense bool
 }
+
+// EnterpriseLicenseURL is where the Enterprise licence can be read before
+// accepting it. The licence text is not built into this program: the Standard
+// edition carries nothing from enterprise/, only where to find it.
+func EnterpriseLicenseURL() string { return brand.RepoURL() + "/blob/main/enterprise/LICENSE" }
 
 // engineHost is where the engine runs: the Lima VM (macOS), the WSL distro
 // (Windows) or this machine (Linux). host_update_<os>.go provide it.
@@ -105,6 +117,60 @@ func StartUpdateNotice() func() {
 
 func (u *updater) printf(format string, args ...any) { fmt.Fprintf(u.out, format, args...) }
 
+// switching reports whether this run installs the other edition (`fox upgrade`).
+func (u *updater) switching() bool {
+	return u.opts.Edition != "" && u.opts.Edition != update.ThisEdition()
+}
+
+// target is the platform to install for, in the edition this run wants.
+func (u *updater) target() update.Target {
+	t := u.hooks.target()
+	t.Edition = u.opts.Edition
+	return t
+}
+
+// editionName is how an edition is named to a person.
+func editionName(ed string) string {
+	if ed == update.EditionEnterprise {
+		return "Enterprise"
+	}
+	return "Standard"
+}
+
+// confirmSwitch asks before changing edition. Moving to Enterprise also means
+// running software under a different licence, so that is shown first and
+// accepted explicitly: --accept-license, or a yes to the question that names it.
+// --yes alone skips the question about restarting, never the licence.
+func (u *updater) confirmSwitch(tag string) (bool, error) {
+	toEnt := u.opts.Edition == update.EditionEnterprise
+	if toEnt {
+		u.printf("\nFoxByte Enterprise is not open source. It is licensed under the FoxByte\n")
+		u.printf("Enterprise License, not the AGPL that covers the edition you have now:\n")
+		u.printf("  %s\n", EnterpriseLicenseURL())
+		u.printf("Its paid features need a licence key; until one is activated it works like Standard.\n")
+	} else {
+		u.printf("\nThe paid features stop working in the Standard edition. Your licence file is kept,\n")
+		u.printf("so switching back to Enterprise restores them.\n")
+	}
+	if (u.opts.Yes || !u.interactive) && (!toEnt || u.opts.AcceptLicense) {
+		return true, nil
+	}
+	if !u.interactive {
+		return false, fmt.Errorf("not a terminal — run `%s upgrade --edition enterprise --accept-license --yes` to accept the licence and switch without the questions", brand.CLI)
+	}
+	q := fmt.Sprintf("Switch to the %s edition of %s now? The servers restart for a few seconds; your data is not touched. [y/N] ", editionName(u.opts.Edition), tag)
+	if toEnt && !u.opts.AcceptLicense {
+		q = fmt.Sprintf("Accept the FoxByte Enterprise License and switch to the Enterprise edition of %s now? The servers restart for a few seconds; your data is not touched. [y/N] ", tag)
+	}
+	u.printf("\n%s", q)
+	line, rerr := bufio.NewReader(u.in).ReadString('\n')
+	a := strings.ToLower(strings.TrimSpace(line))
+	if rerr != nil && a == "" {
+		return false, fmt.Errorf("no answer — run `%s upgrade --edition %s --accept-license --yes` to switch without the questions", brand.CLI, u.opts.Edition)
+	}
+	return a == "y" || a == "yes", nil
+}
+
 // reportedVersion reads the version out of what `fox version` printed.
 //
 // It takes the first field that parses as one, rather than a fixed position.
@@ -131,25 +197,48 @@ func (u *updater) run(ctx context.Context) error {
 	if err != nil || cur.IsDev() {
 		return fmt.Errorf("this is a development build (%s) — `fox update` updates installed releases; install one with the installer first", u.current)
 	}
-	t := u.hooks.target()
-	u.printf("Checking for a newer FoxByte release…\n")
+	t := u.target()
+	if u.switching() {
+		// The same version, in the other edition: a switch is not an update.
+		if u.opts.Version == "" {
+			u.opts.Version = cur.String()
+		}
+		u.printf("Finding the %s edition of FoxByte %s…\n", editionName(u.opts.Edition), u.opts.Version)
+	} else {
+		u.printf("Checking for a newer FoxByte release…\n")
+	}
 	o, err := u.client.Resolve(ctx, cur, t, u.opts.Version)
 	if err != nil {
+		if u.switching() {
+			return fmt.Errorf("finding the %s edition: %w", editionName(u.opts.Edition), err)
+		}
 		return fmt.Errorf("checking for updates: %w", err)
 	}
 	if o == nil {
 		u.printf("FoxByte %s is up to date.\n", u.current)
 		return nil
 	}
-	u.printf("FoxByte %s is available (you have %s).\n", o.Release.Tag, u.current)
-	if o.Release.HTMLURL != "" {
-		u.printf("  What's new: %s\n", o.Release.HTMLURL)
+	if u.switching() {
+		u.printf("The %s edition of FoxByte %s is published and signed.\n", editionName(u.opts.Edition), o.Release.Tag)
+		ok, err := u.confirmSwitch(o.Release.Tag)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			u.printf("Not switched.\n")
+			return nil
+		}
+	} else {
+		u.printf("FoxByte %s is available (you have %s).\n", o.Release.Tag, u.current)
+		if o.Release.HTMLURL != "" {
+			u.printf("  What's new: %s\n", o.Release.HTMLURL)
+		}
 	}
 	if u.opts.Check {
 		u.printf("Run `fox update` to install it.\n")
 		return nil
 	}
-	if !u.opts.Yes {
+	if !u.opts.Yes && !u.switching() {
 		if !u.interactive {
 			return fmt.Errorf("not a terminal — run `fox update --yes` to update without the confirmation prompt")
 		}
@@ -170,7 +259,7 @@ func (u *updater) run(ctx context.Context) error {
 		return err
 	}
 	// On macOS the VM's CPU is only known for sure once it runs.
-	if t2 := u.hooks.target(); t2 != t {
+	if t2 := u.target(); t2 != t {
 		t = t2
 		if o, err = u.client.Resolve(ctx, cur, t, o.Release.Tag); err != nil {
 			return fmt.Errorf("checking for updates: %w", err)
@@ -217,6 +306,13 @@ func (u *updater) run(ctx context.Context) error {
 	got, verr := reportedVersion(out)
 	if err != nil || verr != nil || got.Compare(o.Version) != 0 {
 		return fmt.Errorf("the new engine doesn't run in %s (it printed %q, err %v)\nNothing was changed", u.eh.where(), strings.TrimSpace(out), err)
+	}
+	// A switch must have fetched the edition it asked for. The version line
+	// names the Enterprise edition and says nothing for Standard (cmd/fox
+	// versionLine), so a file published under the wrong name is caught here,
+	// before anything is replaced.
+	if u.switching() && strings.Contains(out, "enterprise edition") != (u.opts.Edition == update.EditionEnterprise) {
+		return fmt.Errorf("the downloaded engine is not the %s edition (it printed %q)\nNothing was changed", editionName(u.opts.Edition), strings.TrimSpace(out))
 	}
 	u.printf("  engine %s runs ✓\n", got)
 	if u.hooks.preflight != nil {
@@ -277,6 +373,15 @@ func (u *updater) run(ctx context.Context) error {
 		if err := u.hooks.checkServers(); err != nil {
 			u.printf("\nnote: the control plane isn't answering yet (%v) — check `fox status`\n", err)
 		}
+	}
+	if u.switching() {
+		u.printf("\nDone — FoxByte %s is now the %s edition. Your data was not touched.\n", o.Release.Tag, editionName(u.opts.Edition))
+		if u.opts.Edition == update.EditionEnterprise {
+			u.printf("  Next, activate your licence: in the console choose Upgrade, or run `%s license activate <file>`.\n", brand.CLI)
+		}
+		u.printf("  To switch back: `%s upgrade --edition %s`. The previous binaries are kept in ~/.fox/updates/prev\n",
+			brand.CLI, update.ThisEdition())
+		return nil
 	}
 	u.printf("\nDone — FoxByte is now %s. Your data was not touched.\n", o.Release.Tag)
 	if o.Release.HTMLURL != "" {

@@ -42,6 +42,9 @@ const (
 	EvKeyRevoked     = "key.revoked"
 	EvAdminGranted   = "admin.granted"
 	EvAdminRevoked   = "admin.revoked"
+	// EvEditionSwitch is the console's Install button: who asked, for which
+	// edition, and that the Enterprise License was accepted.
+	EvEditionSwitch  = "edition.switch_started"
 	EvOwnerChanged   = "branch.owner_changed"
 	EvDenied         = "access.denied"
 	EvGatewayRefused = "gateway.refused"

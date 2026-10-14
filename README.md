@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/foxbyte-logo-dark.png" />
-    <img src="docs/brand/foxbyte-logo.png" alt="FoxByte — the database that branches like code" width="420" />
+    <img src="docs/brand/foxbyte-logo.png" alt="FoxByte — every schema change on record, every row change live" width="420" />
   </picture>
 </p>
 
@@ -691,6 +691,19 @@ curl -fsSL https://raw.githubusercontent.com/thefoxbyte/foxbyte/main/deploy/inst
 
 The command is `fox` either way. On macOS and Windows the engine runs in a managed
 Linux VM, and the installer puts the matching edition on both sides.
+
+Already running Standard? An admin can choose **Upgrade → Install Enterprise** in
+the console, or switch from a terminal, at the version you have:
+
+```sh
+fox upgrade --edition enterprise     # sudo on Linux; --edition standard switches back
+```
+
+It shows the Enterprise licence and asks you to accept it before downloading
+anything, checks the signed release the way `fox update` does, and replaces `fox`
+on both sides of the VM. Databases, accounts, keys and settings are not touched.
+The command is part of the free edition, but all it knows about Enterprise is the
+file to fetch: the paid code only ever arrives in that download.
 
 ## License
 

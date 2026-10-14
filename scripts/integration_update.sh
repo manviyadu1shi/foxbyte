@@ -23,6 +23,7 @@ PORT=18931
 export FOX_UPDATE_BASE_URL="http://127.0.0.1:$PORT"
 V="$T/bin/fox"
 ENGINE="fox-linux-$ARCH"
+ENT_ENGINE="fox-enterprise-linux-$ARCH"   # what `fox upgrade --edition enterprise` fetches
 PASS=0
 FAIL=0
 HTTP_PID=""
@@ -68,13 +69,16 @@ build() { (cd "$ROOT" && go build -ldflags "-X github.com/thefoxbyte/foxbyte/int
 mkdir -p "$T/bin" "$T/www/dl/v0.98.0" "$T/www/dl/v0.99.0" "$T/www/dl/v0.99.5" "$T/www/dl/v1.0.0"
 build 0.98.0 "$V" || { echo "build failed"; exit 1; }
 build 0.99.0 "$T/www/dl/v0.99.0/$ENGINE" || { echo "build failed"; exit 1; }
+# The Enterprise build of the same version, published beside it as a release does.
+(cd "$ROOT" && go build -tags enterprise -ldflags "-X github.com/thefoxbyte/foxbyte/internal/version.Version=0.99.0 -X github.com/thefoxbyte/foxbyte/internal/update.releasePublicKey=$RELEASE_PUB" \
+	-o "$T/www/dl/v0.99.0/$ENT_ENGINE" ./cmd/fox) || { echo "enterprise build failed"; exit 1; }
 cp "$V" "$T/www/dl/v0.98.0/$ENGINE"
 cp "$T/www/dl/v0.99.0/$ENGINE" "$T/www/dl/v1.0.0/$ENGINE"
 cp "$T/www/dl/v0.99.0/$ENGINE" "$T/good-engine"
 # v1.0.0 is a prerelease and v0.99.5 has no engine yet: neither may be offered.
-python3 - "$FOX_UPDATE_BASE_URL" "$T/www" "$ENGINE" "$T/release.key" <<'PY'
+python3 - "$FOX_UPDATE_BASE_URL" "$T/www" "$ENGINE" "$T/release.key" "$ENT_ENGINE" <<'PY'
 import hashlib, json, os, subprocess, sys
-base, www, engine, key = sys.argv[1:5]
+base, www, engine, key, ent = sys.argv[1:6]
 def rel(tag, files, pre=False):
     d = os.path.join(www, "dl", tag)
     assets, sums = [], ""
@@ -91,7 +95,7 @@ def rel(tag, files, pre=False):
                         "-out", os.path.join(d, "SHA256SUMS.sig")], check=True)
         assets.append({"name": "SHA256SUMS.sig", "size": 64, "browser_download_url": f"{base}/dl/{tag}/SHA256SUMS.sig"})
     return {"tag_name": tag, "draft": False, "prerelease": pre, "html_url": f"{base}/releases/tag/{tag}", "assets": assets}
-rels = [rel("v1.0.0", [engine], pre=True), rel("v0.99.5", []), rel("v0.99.0", [engine]), rel("v0.98.0", [engine])]
+rels = [rel("v1.0.0", [engine], pre=True), rel("v0.99.5", []), rel("v0.99.0", [engine, ent]), rel("v0.98.0", [engine])]
 os.makedirs(os.path.join(www, "repos/thefoxbyte/foxbyte"), exist_ok=True)
 json.dump(rels, open(os.path.join(www, "repos/thefoxbyte/foxbyte/releases"), "w"))
 PY
@@ -214,6 +218,59 @@ assert_eq "control plane answers" "$(curl -sk -o /dev/null -w '%{http_code}' htt
 echo "### 8. up to date afterwards"
 contains "--check says up to date" "FoxByte 0.99.0 is up to date." "$("$V" update --check 2>&1)"
 lacks "start shows no notice" "is available" "$(FOX_UPDATE_CHECK_INTERVAL=0 "$V" start 2>&1)"
+
+echo "### 9. fox upgrade switches edition at the version it runs"
+# Moving to Enterprise means another licence: --yes alone never accepts it.
+OUT="$("$V" upgrade --edition enterprise --yes </dev/null 2>&1)"; CODE=$?
+assert_eq "without --accept-license it refuses, naming the flag" "$CODE:$(grep -c -- '--accept-license' <<<"$OUT")" "1:1"
+contains "…and shows where the licence is" "enterprise/LICENSE" "$OUT"
+lacks "…and is still Standard" "enterprise edition" "$("$V" version 2>&1)"
+CP_PID="$(pid_of 'control API')"
+OUT="$("$V" upgrade --edition enterprise --accept-license --yes 2>&1)"; CODE=$?
+assert_eq "upgrade exits 0" "$CODE" "0"
+[ "$CODE" = 0 ] || tail -n 30 <<<"$OUT" | sed 's/^/      /'
+contains "fetched the Enterprise file" "$ENT_ENGINE ✓" "$OUT"
+contains "says it switched" "FoxByte v0.99.0 is now the Enterprise edition. Your data was not touched." "$OUT"
+contains "says how to activate a licence" "license activate" "$OUT"
+contains "fox is now the Enterprise build" "enterprise edition" "$("$V" version 2>&1)"
+assert_eq "…of the same version" "$(fox_version "$V")" "0.99.0"
+NEW_CP="$(pid_of 'control API')"
+assert_eq "the servers restarted onto it" "$([ -n "$NEW_CP" ] && [ "$NEW_CP" != "$CP_PID" ] && echo yes)" "yes"
+assert_eq "main data intact" "$(pg pg-main 'SELECT count(*) FROM updkeep')" "3"
+assert_eq "branch data intact" "$(pg pg-updb 'SELECT x FROM onbranch')" "7"
+assert_eq "a key made before still works" "$(PGPASSWORD="$KEY" psql "postgresql://dbadmin@127.0.0.1:6432/main?sslmode=require" -tAc 'SELECT count(*) FROM updkeep' 2>&1)" "3"
+contains "asking again says it is already Enterprise" "already the Enterprise edition" "$("$V" upgrade --edition enterprise 2>&1)"
+OUT="$("$V" upgrade --edition standard --yes 2>&1)"; CODE=$?
+assert_eq "switching back exits 0, with no licence to accept" "$CODE" "0"
+lacks "fox is Standard again" "enterprise edition" "$("$V" version 2>&1)"
+assert_eq "main data still intact" "$(pg pg-main 'SELECT count(*) FROM updkeep')" "3"
+
+echo "### 10. the console's Install button switches the engine"
+# The Upgrade modal starts the same switch through the API, as a job the
+# engine runs detached, and reads its progress back from the control plane
+# that comes up on the other edition.
+"$V" admin grant "$EMAIL" >/dev/null 2>&1; sleep 2   # a grant reaches the servers within a second
+api() { curl -sk -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$@"; }
+code() { curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$@"; }
+contains "the public edition answer, without signing in" '"edition":"standard"' "$(curl -sk https://localhost:8080/api/edition)"
+assert_eq "the Install button needs the licence accepted" \
+	"$(code -X POST -d '{"edition":"enterprise"}' https://localhost:8080/api/edition/switch)" "400"
+assert_eq "…and starts the switch when it is" \
+	"$(code -X POST -d '{"edition":"enterprise","accept_license":true}' https://localhost:8080/api/edition/switch)" "202"
+STATE=""
+for _ in $(seq 90); do
+	STATE="$(api https://localhost:8080/api/edition/switch 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state",""))' 2>/dev/null)"
+	case "$STATE" in done|failed) break ;; esac
+	sleep 2
+done
+assert_eq "the switch finishes, reported by the control plane that came back" "$STATE" "done"
+[ "$STATE" = done ] || api https://localhost:8080/api/edition/switch | head -c 2000 | sed 's/^/      /'
+contains "the engine is now the Enterprise build" "enterprise edition" "$("$V" version 2>&1)"
+contains "and says so publicly" '"edition":"enterprise"' "$(curl -sk https://localhost:8080/api/edition)"
+assert_eq "main data intact after the button" "$(pg pg-main 'SELECT count(*) FROM updkeep')" "3"
+contains "the security log records who switched, and that the licence was accepted" \
+	"Enterprise License accepted" "$(api https://localhost:8080/api/audit)"
+"$V" upgrade --edition standard --yes >/dev/null 2>&1   # back, for whatever runs next
 
 echo
 echo "integration-update: $PASS passed, $FAIL failed"

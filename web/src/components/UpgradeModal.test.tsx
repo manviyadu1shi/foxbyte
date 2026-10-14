@@ -9,13 +9,21 @@ import type { License, LicenseActivation } from '../api'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, activateLicense: vi.fn() }
+  return { ...actual, activateLicense: vi.fn(), startEditionSwitch: vi.fn(), getEditionSwitch: vi.fn() }
+})
+vi.mock('../features', async () => {
+  const actual = await vi.importActual<typeof import('../features')>('../features')
+  // A spy that still does the real thing, which the shared-refresh tests rely on.
+  return { ...actual, refreshEntitlement: vi.fn(actual.refreshEntitlement) }
 })
 
 import UpgradeModal, { outcomeOf } from './UpgradeModal'
-import { activateLicense } from '../api'
+import { activateLicense, getEditionSwitch, startEditionSwitch } from '../api'
+import { refreshEntitlement } from '../features'
 
 const mockActivate = vi.mocked(activateLicense)
+const mockStart = vi.mocked(startEditionSwitch)
+const mockSwitch = vi.mocked(getEditionSwitch)
 
 const lic = (over: Partial<License> = {}): License => ({
   edition: 'enterprise', present: false, state: 'invalid', unlocks: false,
@@ -31,7 +39,11 @@ const licenceText = '{"id":"FB-0001","customer":"Acme Ltd","signature":"abc"}'
 // vitest, resetting a module-mocked function makes a rejection the component
 // *catches* still fail the test — reproduced in isolation, and nothing to do
 // with the modal.
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  // No switch has run unless a test says so.
+  mockSwitch.mockResolvedValue({ state: 'none', edition: 'standard' })
+})
 afterEach(cleanup)
 
 describe('outcomeOf', () => {
@@ -168,14 +180,82 @@ describe('on an Enterprise build', () => {
 describe('on a Standard build', () => {
   // No licence can unlock code that is not in the binary, so the modal must
   // not offer to take one.
-  it('shows how to install the Enterprise build instead of a licence form', () => {
+  it('gives one command to switch, instead of a licence form', () => {
     render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
     expect(screen.queryByRole('button', { name: 'Activate' })).toBeNull()
     expect(screen.queryByLabelText('Licence file')).toBeNull()
+    expect(screen.getByText('fox upgrade --edition enterprise')).toBeTruthy()
+    // The installer stays as the way for a fox too old to have the command,
+    // with the step people miss: the running engine keeps the old program.
     expect(screen.getByText(/EDITION=enterprise sh/)).toBeTruthy()
     expect(screen.getByText(/EDITION = 'enterprise'/)).toBeTruthy()
-    // And the step people miss: the running engine keeps the old program.
-    expect(screen.getByText(/Restart onto it/)).toBeTruthy()
+    expect(screen.getByText(/restart onto it/)).toBeTruthy()
+  })
+
+  it('copies a command with one click', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy: fox upgrade --edition enterprise' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('fox upgrade --edition enterprise'))
+    expect(await screen.findByText('copied')).toBeTruthy()
+  })
+
+  it('selects the command, and says so, when the clipboard is refused', async () => {
+    const writeText = vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy: fox upgrade --edition enterprise' }))
+    expect(await screen.findByText(/^press (⌘C|Ctrl\+C)$/)).toBeTruthy()
+    expect(String(window.getSelection())).toBe('fox upgrade --edition enterprise')
+  })
+})
+
+describe('installing Enterprise from the modal', () => {
+  it('waits for the licence to be accepted, then starts the switch', async () => {
+    mockStart.mockResolvedValue({ state: 'running' })
+    render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+    const install = screen.getByRole('button', { name: 'Install Enterprise' }) as HTMLButtonElement
+    expect(install.disabled).toBe(true)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'I accept the FoxByte Enterprise License' }))
+    expect(install.disabled).toBe(false)
+    fireEvent.click(install)
+    await waitFor(() => expect(mockStart).toHaveBeenCalledWith('enterprise', true))
+    expect(await screen.findByText(/Downloading the signed Enterprise build/)).toBeTruthy()
+  })
+
+  it('asks the page to look again once the switch is done', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mockSwitch.mockResolvedValueOnce({ state: 'running', edition: 'enterprise', log: ['Downloading v1.2.0'] })
+      mockSwitch.mockResolvedValue({ state: 'done', edition: 'enterprise', log: ['Done'] })
+      render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+      // Opened while one runs: it shows that one, not the form.
+      expect(await screen.findByText('Downloading v1.2.0')).toBeTruthy()
+      await act(async () => { await vi.advanceTimersByTimeAsync(2100) })
+      await waitFor(() => expect(refreshEntitlement).toHaveBeenCalled())
+      expect(screen.getByText(/Enterprise is installed/)).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says why a switch failed and offers the terminal instead', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mockStart.mockResolvedValue({ state: 'running' })
+      render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByRole('checkbox', { name: 'I accept the FoxByte Enterprise License' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Install Enterprise' }))
+      await waitFor(() => expect(mockStart).toHaveBeenCalled())
+      mockSwitch.mockResolvedValue({ state: 'failed', edition: 'enterprise', error: 'checksum mismatch — Nothing was changed', log: ['fox-enterprise-linux-arm64'] })
+      await act(async () => { await vi.advanceTimersByTimeAsync(2100) })
+      expect((await screen.findByRole('alert')).textContent).toContain('Nothing was changed')
+      expect(screen.getByText('fox upgrade --edition enterprise')).toBeTruthy()
+      expect(refreshEntitlement).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

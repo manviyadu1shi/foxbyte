@@ -17,17 +17,43 @@ import (
 // Linux VM or distro the engine runs in (macOS; Windows is always amd64).
 type Target struct {
 	GOOS, HostArch, GuestArch string
+	// Edition is the edition to fetch: "" for this build's own, which is what
+	// `fox update` always wants, or EditionStandard / EditionEnterprise when
+	// `fox upgrade` is switching to the other one.
+	Edition string
 }
+
+// The editions a release publishes binaries for.
+const (
+	EditionStandard   = "standard"
+	EditionEnterprise = "enterprise"
+)
+
+// ThisEdition is the edition this binary was built as.
+func ThisEdition() string {
+	if edition.Enterprise {
+		return EditionEnterprise
+	}
+	return EditionStandard
+}
+
+// switching reports whether t asks for the other edition than this build's.
+func (t Target) switching() bool { return t.Edition != "" && t.Edition != ThisEdition() }
 
 // ImageContextAsset is the Postgres image build context Windows installs ship.
 const ImageContextAsset = "foxbyte-docker-context.tar.gz"
 
-// binName is the asset prefix for this build's edition. An update must stay in
-// the edition it is updating: fetching the Standard asset into an Enterprise
-// install would silently remove the paid features, and the user would read it as
-// their licence having stopped working.
-func binName() string {
-	if edition.Enterprise {
+// binName is the asset prefix for the edition t asks for. An update stays in
+// the edition it is updating (t.Edition is empty): fetching the Standard asset
+// into an Enterprise install would silently remove the paid features, and the
+// user would read it as their licence having stopped working. Only `fox
+// upgrade`, which says so and asks first, names the other edition.
+func binName(t Target) string {
+	ed := t.Edition
+	if ed == "" {
+		ed = ThisEdition()
+	}
+	if ed == EditionEnterprise {
 		return brand.CLI + "-enterprise"
 	}
 	return brand.CLI
@@ -38,13 +64,13 @@ func binName() string {
 func EngineAsset(t Target) string {
 	switch t.GOOS {
 	case "windows":
-		return binName() + "-linux-amd64"
+		return binName(t) + "-linux-amd64"
 	case "darwin":
 		if t.GuestArch != "" {
-			return binName() + "-linux-" + t.GuestArch
+			return binName(t) + "-linux-" + t.GuestArch
 		}
 	}
-	return binName() + "-linux-" + t.HostArch
+	return binName(t) + "-linux-" + t.HostArch
 }
 
 // HostAsset is the `fox` binary for the computer itself on macOS and Windows,
@@ -52,9 +78,9 @@ func EngineAsset(t Target) string {
 func HostAsset(t Target) string {
 	switch t.GOOS {
 	case "darwin":
-		return binName() + "-darwin-" + t.HostArch
+		return binName(t) + "-darwin-" + t.HostArch
 	case "windows":
-		return binName() + "-windows-amd64.exe"
+		return binName(t) + "-windows-amd64.exe"
 	}
 	return ""
 }
@@ -102,7 +128,9 @@ func Candidates(rels []Release, current Version, t Target, pin string) ([]Releas
 			if err != nil || v.Compare(want) != 0 || r.Draft {
 				continue
 			}
-			if v.Compare(current) <= 0 {
+			// Switching edition installs the same version in the other
+			// edition, so "the same" is allowed then. Older never is.
+			if c := v.Compare(current); c < 0 || (c == 0 && !t.switching()) {
 				return nil, fmt.Errorf("%s is not newer than the installed %s — to go back to an older version, reinstall it with the installer (FOX_VERSION=%s)", r.Tag, current, r.Tag)
 			}
 			if m := missingAssets(r, required); len(m) > 0 {

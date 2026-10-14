@@ -43,6 +43,8 @@ var localCommands = map[string]bool{
 	"": true, "help": true, "-h": true, "--help": true,
 	"version": true, "-v": true, "--version": true,
 	"setup": true, "vm": true, "update": true,
+	// upgrade replaces fox on this computer as well as the engine, as update does.
+	"upgrade": true,
 	// license reads this machine's fingerprint, and the machine that matters is
 	// the one a person sits at. Forwarded into the VM it would read the guest's,
 	// and `fox setup` recreating that VM would look exactly like licence

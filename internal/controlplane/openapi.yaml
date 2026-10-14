@@ -125,6 +125,57 @@ paths:
         "400": { description: Not a licence, or not signed by the key this build trusts }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { description: Only an admin may activate a licence }
+
+  /api/edition:
+    get:
+      tags: [status]
+      security: []
+      summary: >-
+        Which edition this engine is — `standard` or `enterprise`, and nothing else. Public: fox on
+        a Mac or a Windows PC asks it before each command, to catch up with an engine switched from
+        the console.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  edition: { type: string, enum: [standard, enterprise] }
+
+  /api/edition/switch:
+    get:
+      tags: [license]
+      summary: >-
+        How the last switch started from the console went (admin only): running, done or failed,
+        with the last lines of its output. `none` when none was started here.
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Only an admin may see the edition switch }
+    post:
+      tags: [license]
+      summary: >-
+        Switch this engine to the other edition of the version it runs (admin only), in the
+        background — `fox upgrade`'s own verified path. The servers restart on the new edition;
+        data is not touched. Moving to Enterprise requires `accept_license`. Poll GET for progress.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [edition]
+              properties:
+                edition: { type: string, enum: [enterprise, standard] }
+                accept_license: { type: boolean, description: The FoxByte Enterprise License was accepted. }
+      responses:
+        "202": { description: Started }
+        "400": { description: The licence was not accepted, an unknown edition, or a development build }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Only an admin may change the edition }
+        "409": { description: Already that edition, or a switch is already running }
   /api/branches/{name}/realtime/enable:
     post:
       tags: [branches]
