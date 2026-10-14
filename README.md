@@ -692,6 +692,18 @@ curl -fsSL https://raw.githubusercontent.com/thefoxbyte/foxbyte/main/deploy/inst
 The command is `fox` either way. On macOS and Windows the engine runs in a managed
 Linux VM, and the installer puts the matching edition on both sides.
 
+Already running Standard? Switch the install you have, at the version you have:
+
+```sh
+fox upgrade --edition enterprise     # sudo on Linux; --edition standard switches back
+```
+
+It shows the Enterprise licence and asks you to accept it before downloading
+anything, checks the signed release the way `fox update` does, and replaces `fox`
+on both sides of the VM. Databases, accounts, keys and settings are not touched.
+The command is part of the free edition, but all it knows about Enterprise is the
+file to fetch: the paid code only ever arrives in that download.
+
 ## License
 
 - **Core / server** (this repo, except `clients/` and `enterprise/`):

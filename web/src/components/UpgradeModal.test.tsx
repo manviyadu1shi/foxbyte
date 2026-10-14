@@ -168,14 +168,34 @@ describe('on an Enterprise build', () => {
 describe('on a Standard build', () => {
   // No licence can unlock code that is not in the binary, so the modal must
   // not offer to take one.
-  it('shows how to install the Enterprise build instead of a licence form', () => {
+  it('gives one command to switch, instead of a licence form', () => {
     render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
     expect(screen.queryByRole('button', { name: 'Activate' })).toBeNull()
     expect(screen.queryByLabelText('Licence file')).toBeNull()
+    expect(screen.getByText('fox upgrade --edition enterprise')).toBeTruthy()
+    // The installer stays as the way for a fox too old to have the command,
+    // with the step people miss: the running engine keeps the old program.
     expect(screen.getByText(/EDITION=enterprise sh/)).toBeTruthy()
     expect(screen.getByText(/EDITION = 'enterprise'/)).toBeTruthy()
-    // And the step people miss: the running engine keeps the old program.
-    expect(screen.getByText(/Restart onto it/)).toBeTruthy()
+    expect(screen.getByText(/restart onto it/)).toBeTruthy()
+  })
+
+  it('copies a command with one click', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy: fox upgrade --edition enterprise' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('fox upgrade --edition enterprise'))
+    expect(await screen.findByText('copied')).toBeTruthy()
+  })
+
+  it('selects the command, and says so, when the clipboard is refused', async () => {
+    const writeText = vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<UpgradeModal lic={lic({ edition: 'standard' })} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy: fox upgrade --edition enterprise' }))
+    expect(await screen.findByText(/^press (⌘C|Ctrl\+C)$/)).toBeTruthy()
+    expect(String(window.getSelection())).toBe('fox upgrade --edition enterprise')
   })
 })
 

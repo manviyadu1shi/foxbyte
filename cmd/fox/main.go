@@ -67,6 +67,9 @@ Setup:
                        Remove FoxByte from this machine: containers, storage, state and the command
   update [--check]     Install the newest release: new engine, restarted servers, Blackbox upgrades — data untouched
                        (--yes skips the confirmation, --version vX.Y.Z picks a release)
+  upgrade --edition enterprise
+                       Switch to the Enterprise edition of the version you run (or --edition standard
+                       to switch back); shows its licence first — data untouched
 
 Stack:
   start                Bring EVERYTHING up in the background: stack + gateway + APIs
@@ -292,6 +295,8 @@ func main() {
 		notice()
 	case "update":
 		updateCmd(os.Args[2:])
+	case "upgrade": // switch edition: Standard ⇄ Enterprise, same version
+		upgradeCmd(os.Args[2:])
 	case "_update-guest": // the engine-side steps of `fox update`
 		updateGuestCmd(os.Args[2:])
 	case "stop":

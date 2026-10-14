@@ -618,6 +618,7 @@
       <li class="ok">An Enterprise build with no licence behaves exactly like Standard</li>
       <li class="ok">Installer <code>--edition</code>/<code>FOX_EDITION</code>; launcher and VM engine always match</li>
       <li class="ok"><code>fox update</code> stays inside its edition; the release publishes and checks both sets</li>
+      <li class="ok"><code>fox upgrade --edition enterprise|standard</code> switches an install at the same version, licence accepted first</li>
       <li class="lim">Source-available deters, it does not prevent: the check can be removed in breach</li>
       <li class="lim">A dependency only the paid code uses still appears in the AGPL module’s <code>go.mod</code></li></ul></td><td class="tb">Unit (edition, boundary), scripts/test_editions.sh, CI builds both</td></tr>
     <tr data-id="M9" data-st="part"><td class="c"><i class="ck part"></i></td><td class="id">M9</td><td><b>Licensing</b><ul class="subs">

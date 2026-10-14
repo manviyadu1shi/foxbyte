@@ -197,7 +197,45 @@ function StatusMark({ outcome }: { outcome: Outcome }) {
   )
 }
 
+/**
+ * A command to run, with a button that copies it. Long ones wrap rather than
+ * run off the edge. The clipboard can refuse (an older browser, a page not
+ * served over HTTPS), so the text is then selected for a manual copy instead.
+ */
+function Cmd({ text }: { text: string }) {
+  // 'selected' says what to do next, so a refused clipboard does not look like
+  // a button that did nothing.
+  const [state, setState] = useState<'idle' | 'copied' | 'selected'>('idle')
+  const ref = useRef<HTMLElement>(null)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setState('copied')
+    } catch {
+      const sel = window.getSelection()
+      if (sel && ref.current) {
+        const r = document.createRange()
+        r.selectNodeContents(ref.current)
+        sel.removeAllRanges()
+        sel.addRange(r)
+      }
+      setState('selected')
+    }
+    setTimeout(() => setState('idle'), 2500)
+  }
+  const keys = /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘C' : 'Ctrl+C'
+  return (
+    <pre className="cmd">
+      <code ref={ref}>{text}</code>
+      <button type="button" className="copy" onClick={copy} aria-label={`Copy: ${text}`}>
+        {state === 'copied' ? 'copied' : state === 'selected' ? `press ${keys}` : 'copy'}
+      </button>
+    </pre>
+  )
+}
+
 function StandardBuild({ titleId, onClose }: { titleId: string; onClose: () => void }) {
+  const upgrade = `${BRAND.cli} upgrade --edition enterprise`
   const unix = `curl -fsSL https://raw.githubusercontent.com/${BRAND.repo}/main/deploy/install.sh | ${BRAND.envPrefix}EDITION=enterprise sh`
   const win = `$env:${BRAND.envPrefix}EDITION = 'enterprise'; irm https://raw.githubusercontent.com/${BRAND.repo}/main/deploy/install.ps1 | iex`
   return (
@@ -205,22 +243,37 @@ function StandardBuild({ titleId, onClose }: { titleId: string; onClose: () => v
       <h3 id={titleId}>Moving to {BRAND.product} Enterprise</h3>
       <p className="modal-body">
         This is the standard edition, and a licence cannot change that: the paid features are not
-        in this build at all, which is what keeps it free to share. Install the Enterprise build
-        over it. That replaces the <code>{BRAND.cli}</code> program and nothing else, so your
-        databases, accounts and settings stay where they are.
-      </p>
-      <p className="modal-body"><b>1. Install it</b> — macOS and Linux:</p>
-      <pre className="cmd"><code>{unix}</code></pre>
-      <p className="modal-body">Windows (PowerShell):</p>
-      <pre className="cmd"><code>{win}</code></pre>
-      <p className="modal-body">
-        <b>2. Restart onto it</b> — the running engine keeps the old program until it stops:
-        {' '}<code>{BRAND.cli} stop</code>, then <code>{BRAND.cli} setup</code> on macOS or Windows (which also
-        puts the Enterprise engine into the VM), or <code>sudo {BRAND.cli} start</code> on Linux.
+        in this build at all, which is what keeps it free to share. One command switches this
+        install to the Enterprise build of the same version. It replaces the <code>{BRAND.cli}</code> program
+        and nothing else, so your databases, accounts and settings stay where they are.
       </p>
       <p className="modal-body">
-        <b>3. Come back here</b> and choose Upgrade again to activate your licence.
+        <b>1. Run this</b> on the computer where {BRAND.product} is installed (on Linux,
+        put <code>sudo</code> in front):
       </p>
+      <Cmd text={upgrade} />
+      <p className="modal-note">
+        It shows the {BRAND.product} Enterprise License and asks you to accept it before
+        downloading anything, checks the signed release the way <code>{BRAND.cli} update</code> does,
+        and restarts the servers for a few seconds.
+      </p>
+      <p className="modal-body">
+        <b>2. Come back here</b> and choose Upgrade again to activate your licence.
+      </p>
+      <details className="modal-more">
+        <summary>It says “unknown command: upgrade”?</summary>
+        <p className="modal-body">
+          Your <code>{BRAND.cli}</code> is older than that command. Run <code>{BRAND.cli} update</code> first,
+          or install the Enterprise build with the installer — macOS and Linux:
+        </p>
+        <Cmd text={unix} />
+        <p className="modal-body">Windows (PowerShell):</p>
+        <Cmd text={win} />
+        <p className="modal-body">
+          Then restart onto it: <code>{BRAND.cli} stop</code> and <code>{BRAND.cli} setup</code> on macOS or
+          Windows, or <code>sudo {BRAND.cli} start</code> on Linux.
+        </p>
+      </details>
       <div className="modal-actions">
         <button className="primary" onClick={onClose} autoFocus>Close</button>
       </div>

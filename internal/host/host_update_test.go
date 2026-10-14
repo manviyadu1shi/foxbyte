@@ -26,6 +26,7 @@ type fakeEngine struct {
 	oldV, newV    string
 	engineSwapped bool
 	failInstall   bool
+	newLine       string // what the new engine's `version` prints, if not "fox <newV>"
 }
 
 func (f *fakeEngine) where() string  { return "the fake VM" }
@@ -47,6 +48,9 @@ func (f *fakeEngine) run(bin string, args ...string) error {
 }
 func (f *fakeEngine) output(bin string, args ...string) (string, error) {
 	if bin == "/staged" || f.engineSwapped {
+		if f.newLine != "" {
+			return f.newLine + "\n", nil
+		}
 		return "fox " + f.newV + "\n", nil
 	}
 	return "fox " + f.oldV + "\n", nil
@@ -54,7 +58,11 @@ func (f *fakeEngine) output(bin string, args ...string) (string, error) {
 
 // fakeReleases serves a GitHub releases list with one release, v0.99.0.
 func fakeReleases(t *testing.T, tamper bool) *httptest.Server {
-	files := map[string]string{EngineAsset("amd64"): "engine 0.99.0"}
+	return fakeReleaseOf(t, map[string]string{EngineAsset("amd64"): "engine 0.99.0"}, tamper)
+}
+
+// fakeReleaseOf serves v0.99.0 with exactly these files, signed.
+func fakeReleaseOf(t *testing.T, files map[string]string, tamper bool) *httptest.Server {
 	var mux http.ServeMux
 	srv := httptest.NewServer(&mux)
 	t.Cleanup(srv.Close)
@@ -93,7 +101,11 @@ type updateRun struct {
 
 func runFakeUpdate(t *testing.T, current string, opts UpdateOptions, tamper bool, mutate func(*updater, *fakeEngine)) *updateRun {
 	t.Helper()
-	srv := fakeReleases(t, tamper)
+	return runFakeUpdateFrom(t, fakeReleases(t, tamper), current, opts, mutate)
+}
+
+func runFakeUpdateFrom(t *testing.T, srv *httptest.Server, current string, opts UpdateOptions, mutate func(*updater, *fakeEngine)) *updateRun {
+	t.Helper()
 	r := &updateRun{eng: &fakeEngine{oldV: current, newV: "0.99.0"}}
 	u := &updater{
 		opts:    opts,
@@ -246,6 +258,82 @@ func TestReportedVersionIgnoresWhateverElseTheLineSays(t *testing.T) {
 		}
 		if got.String() != c.want {
 			t.Errorf("reportedVersion(%q) = %s, want %s", c.out, got, c.want)
+		}
+	}
+}
+
+// otherEdition is the edition this test binary was not built as.
+func otherEdition() string {
+	if update.ThisEdition() == update.EditionEnterprise {
+		return update.EditionStandard
+	}
+	return update.EditionEnterprise
+}
+
+// versionLineOf is what `fox version` prints in an edition (cmd/fox versionLine).
+func versionLineOf(ed, v string) string {
+	if ed == update.EditionEnterprise {
+		return "fox " + v + " (enterprise edition, no licence active)"
+	}
+	return "fox " + v
+}
+
+// `fox upgrade`: the other edition's files of the version already installed,
+// through every step an update takes.
+func TestUpgradeSwitchesEditionAtTheSameVersion(t *testing.T) {
+	ed := otherEdition()
+	engine := update.EngineAsset(update.Target{GOOS: "linux", HostArch: "amd64", Edition: ed})
+	srv := fakeReleaseOf(t, map[string]string{engine: "engine 0.99.0 " + ed}, false)
+	r := runFakeUpdateFrom(t, srv, "0.99.0", UpdateOptions{Edition: ed, AcceptLicense: true, Yes: true},
+		func(_ *updater, e *fakeEngine) { e.newLine = versionLineOf(ed, "0.99.0") })
+	if r.err != nil {
+		t.Fatalf("upgrade: %v\n%s", r.err, r.out.String())
+	}
+	if !strings.Contains(strings.Join(r.eng.calls, "\n"), "stage "+engine) {
+		t.Errorf("the %s engine was not the one staged: %v", ed, r.eng.calls)
+	}
+	if !r.eng.engineSwapped || !r.hostReplaced {
+		t.Error("the engine or fox on this computer was not replaced")
+	}
+	want := "is now the " + editionName(ed) + " edition"
+	if !strings.Contains(r.out.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, r.out.String())
+	}
+	if ed == update.EditionEnterprise && !strings.Contains(r.out.String(), EnterpriseLicenseURL()) {
+		t.Errorf("the Enterprise licence was not shown:\n%s", r.out.String())
+	}
+}
+
+// Moving to Enterprise means another licence: --yes alone never accepts it.
+func TestUpgradeNeedsTheLicenceAccepted(t *testing.T) {
+	if otherEdition() != update.EditionEnterprise {
+		t.Skip("only the Standard build switches to Enterprise")
+	}
+	engine := update.EngineAsset(update.Target{GOOS: "linux", HostArch: "amd64", Edition: update.EditionEnterprise})
+	srv := fakeReleaseOf(t, map[string]string{engine: "engine 0.99.0 enterprise"}, false)
+	r := runFakeUpdateFrom(t, srv, "0.99.0", UpdateOptions{Edition: update.EditionEnterprise, Yes: true}, nil)
+	if r.err == nil || !strings.Contains(r.err.Error(), "--accept-license") {
+		t.Fatalf("switched without the licence accepted: %v", r.err)
+	}
+	if len(r.eng.calls) != 0 {
+		t.Errorf("something ran before the licence was accepted: %v", r.eng.calls)
+	}
+}
+
+// A file published under the wrong edition's name is caught before anything
+// is replaced.
+func TestUpgradeRefusesTheWrongEdition(t *testing.T) {
+	ed := otherEdition()
+	engine := update.EngineAsset(update.Target{GOOS: "linux", HostArch: "amd64", Edition: ed})
+	srv := fakeReleaseOf(t, map[string]string{engine: "engine 0.99.0 mislabelled"}, false)
+	r := runFakeUpdateFrom(t, srv, "0.99.0", UpdateOptions{Edition: ed, AcceptLicense: true, Yes: true},
+		func(_ *updater, e *fakeEngine) { e.newLine = versionLineOf(update.ThisEdition(), "0.99.0") })
+	if r.err == nil || !strings.Contains(r.err.Error(), "not the "+editionName(ed)+" edition") {
+		t.Fatalf("a mislabelled engine was accepted: %v", r.err)
+	}
+	for _, c := range r.eng.calls {
+		if strings.Contains(c, "stop-services") || strings.Contains(c, "install-engine") {
+			t.Fatalf("something was changed: %v", r.eng.calls)
 		}
 	}
 }

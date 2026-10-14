@@ -1129,10 +1129,17 @@ button.primary.sm.upgrade-btn { padding: 6px 14px; font-size: 13px; }
 .status-mark.activated { color: var(--green); }
 .status-mark.warning { color: var(--amber); }
 .status-mark.locked { color: var(--red); }
-.upgrade-modal pre.cmd {
-  margin: 6px 0 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--panel-2);
-  border: 1px solid var(--border); font-size: 12px; white-space: pre-wrap; word-break: break-all;
-}
+/* The terminal style every command block uses (pre, above), which reads in both
+   themes. It used to swap in a light background and leave the terminal's light
+   text, so the commands were close to invisible, and `pre code` does not
+   wrap, so they ran off the edge. Wrapped here, with room for the copy button. */
+.upgrade-modal pre.cmd { margin: 6px 0 12px; padding: 10px 70px 10px 12px; }
+/* Break at spaces first; split a word only when it cannot fit (the installer URLs). */
+.upgrade-modal pre.cmd code { white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; font-size: 12px; }
+.upgrade-modal .modal-note { color: var(--muted); font-size: var(--t-sm); margin: -4px 0 12px; }
+.upgrade-modal .modal-note code { color: var(--text); }
+.upgrade-modal details.modal-more { margin: 4px 0 12px; }
+.upgrade-modal details.modal-more summary { cursor: pointer; color: var(--muted); font-size: var(--t-sm); }
 @media (max-width: 560px) {
   .topbar-end { gap: 6px; }
   .edition-badge { padding: 2px 8px; font-size: 11px; }

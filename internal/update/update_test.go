@@ -27,11 +27,11 @@ import (
 // That is the point: an Enterprise install must update itself from the
 // Enterprise assets, and this suite proves it in whichever edition it runs.
 var (
-	engLinuxAMD64   = binName() + "-linux-amd64"
-	engLinuxARM64   = binName() + "-linux-arm64"
-	hostDarwinARM64 = binName() + "-darwin-arm64"
-	hostDarwinAMD64 = binName() + "-darwin-amd64"
-	hostWinAMD64    = binName() + "-windows-amd64.exe"
+	engLinuxAMD64   = binName(Target{}) + "-linux-amd64"
+	engLinuxARM64   = binName(Target{}) + "-linux-arm64"
+	hostDarwinARM64 = binName(Target{}) + "-darwin-arm64"
+	hostDarwinAMD64 = binName(Target{}) + "-darwin-amd64"
+	hostWinAMD64    = binName(Target{}) + "-windows-amd64.exe"
 )
 
 func mustVersion(t *testing.T, s string) Version {
@@ -707,5 +707,52 @@ func TestNoReleaseKeyNoUpdate(t *testing.T) {
 	defer func() { releasePublicKey = old }()
 	if err := VerifySums([]byte("x"), make([]byte, 64)); err != ErrNoReleaseKey {
 		t.Errorf("VerifySums with no key = %v", err)
+	}
+}
+
+// An update stays in its own edition; only a target that names the other one
+// fetches the other edition's files.
+func TestAssetsFollowTheTargetEdition(t *testing.T) {
+	for _, c := range []struct {
+		ed, engine, host string
+	}{
+		{EditionStandard, "fox-linux-arm64", "fox-darwin-arm64"},
+		{EditionEnterprise, "fox-enterprise-linux-arm64", "fox-enterprise-darwin-arm64"},
+	} {
+		tg := Target{GOOS: "darwin", HostArch: "arm64", GuestArch: "arm64", Edition: c.ed}
+		if e, h := EngineAsset(tg), HostAsset(tg); e != c.engine || h != c.host {
+			t.Errorf("%s: engine %q host %q, want %q %q", c.ed, e, h, c.engine, c.host)
+		}
+	}
+	// No edition named: this build's own, exactly as before.
+	own := Target{GOOS: "linux", HostArch: "amd64"}
+	if got, want := EngineAsset(own), binName(Target{Edition: ThisEdition()})+"-linux-amd64"; got != want {
+		t.Errorf("own edition: %q, want %q", got, want)
+	}
+}
+
+// Switching edition may install the version already installed; an update may
+// not, and nothing may go backwards.
+func TestCandidatesAllowTheSameVersionOnlyWhenSwitching(t *testing.T) {
+	other := EditionEnterprise
+	if ThisEdition() == EditionEnterprise {
+		other = EditionStandard
+	}
+	tg := Target{GOOS: "linux", HostArch: "amd64", Edition: other}
+	name := EngineAsset(tg)
+	rel := func(tag string) Release {
+		return Release{Tag: tag, Assets: []Asset{{Name: name}, {Name: SumsAsset}, {Name: SigAsset}}}
+	}
+	rels := []Release{rel("v1.2.0"), rel("v1.1.0")}
+	cur, _ := ParseVersion("1.2.0")
+	if got, err := Candidates(rels, cur, tg, "v1.2.0"); err != nil || len(got) != 1 {
+		t.Fatalf("a switch to the same version was refused: %v", err)
+	}
+	if _, err := Candidates(rels, cur, tg, "v1.1.0"); err == nil {
+		t.Error("a switch went backwards")
+	}
+	same := Target{GOOS: "linux", HostArch: "amd64"}
+	if _, err := Candidates([]Release{{Tag: "v1.2.0", Assets: []Asset{{Name: EngineAsset(same)}, {Name: SumsAsset}, {Name: SigAsset}}}}, cur, same, "v1.2.0"); err == nil {
+		t.Error("an update reinstalled the same version")
 	}
 }
