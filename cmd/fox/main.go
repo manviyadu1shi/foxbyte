@@ -226,6 +226,13 @@ func main() {
 	// Reconciled rather than pushed: a licence activated in the console exists
 	// only in the engine, and pushing this machine's copy over it would undo an
 	// upgrade. The newer activation wins, both ways (syncLicenceWithEngine).
+	// On macOS and Windows, an engine switched to the other edition from the
+	// console leaves fox here behind. Catch up first, then run the command on
+	// the new fox, so its output is the edition the person now has.
+	if exe := host.SyncLauncherEdition(os.Args[1]); exe != "" {
+		rerun(exe)
+	}
+
 	if sub := os.Args[1]; sub == "start" || sub == "up" {
 		syncLicenceWithEngine(true)
 	}
@@ -297,6 +304,8 @@ func main() {
 		updateCmd(os.Args[2:])
 	case "upgrade": // switch edition: Standard ⇄ Enterprise, same version
 		upgradeCmd(os.Args[2:])
+	case "_edition-switch": // the console's Install button, run detached by the control plane
+		editionSwitchCmd(os.Args[2:])
 	case "_update-guest": // the engine-side steps of `fox update`
 		updateGuestCmd(os.Args[2:])
 	case "stop":

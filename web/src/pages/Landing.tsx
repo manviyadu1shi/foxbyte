@@ -16,8 +16,8 @@ export default function Landing() {
     <>
       <section className="hero fade-up">
         <div>
-          <span className="eyebrow"><span className="pip" /> PostgreSQL that branches like code · open source</span>
-          <h1>The database that <span className="gradient-text">branches like code</span>.</h1>
+          <span className="eyebrow"><span className="pip" /> PostgreSQL · branches · Blackbox · realtime</span>
+          <h1>Every schema change <span className="gradient-text">on record</span>. Every row change, <span className="gradient-text">live</span>.</h1>
           <p className="sub">
             An AI agent gets a database of its own in seconds, and you get a tamper-evident
             record of everything it changed — on stock Postgres, at native transaction speed.

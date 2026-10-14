@@ -245,6 +245,33 @@ assert_eq "switching back exits 0, with no licence to accept" "$CODE" "0"
 lacks "fox is Standard again" "enterprise edition" "$("$V" version 2>&1)"
 assert_eq "main data still intact" "$(pg pg-main 'SELECT count(*) FROM updkeep')" "3"
 
+echo "### 10. the console's Install button switches the engine"
+# The Upgrade modal starts the same switch through the API, as a job the
+# engine runs detached, and reads its progress back from the control plane
+# that comes up on the other edition.
+"$V" admin grant "$EMAIL" >/dev/null 2>&1; sleep 2   # a grant reaches the servers within a second
+api() { curl -sk -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$@"; }
+code() { curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' "$@"; }
+contains "the public edition answer, without signing in" '"edition":"standard"' "$(curl -sk https://localhost:8080/api/edition)"
+assert_eq "the Install button needs the licence accepted" \
+	"$(code -X POST -d '{"edition":"enterprise"}' https://localhost:8080/api/edition/switch)" "400"
+assert_eq "…and starts the switch when it is" \
+	"$(code -X POST -d '{"edition":"enterprise","accept_license":true}' https://localhost:8080/api/edition/switch)" "202"
+STATE=""
+for _ in $(seq 90); do
+	STATE="$(api https://localhost:8080/api/edition/switch 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state",""))' 2>/dev/null)"
+	case "$STATE" in done|failed) break ;; esac
+	sleep 2
+done
+assert_eq "the switch finishes, reported by the control plane that came back" "$STATE" "done"
+[ "$STATE" = done ] || api https://localhost:8080/api/edition/switch | head -c 2000 | sed 's/^/      /'
+contains "the engine is now the Enterprise build" "enterprise edition" "$("$V" version 2>&1)"
+contains "and says so publicly" '"edition":"enterprise"' "$(curl -sk https://localhost:8080/api/edition)"
+assert_eq "main data intact after the button" "$(pg pg-main 'SELECT count(*) FROM updkeep')" "3"
+contains "the security log records who switched, and that the licence was accepted" \
+	"Enterprise License accepted" "$(api https://localhost:8080/api/audit)"
+"$V" upgrade --edition standard --yes >/dev/null 2>&1   # back, for whatever runs next
+
 echo
 echo "integration-update: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

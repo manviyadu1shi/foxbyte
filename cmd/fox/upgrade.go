@@ -3,10 +3,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
+	"github.com/thefoxbyte/foxbyte/internal/brand"
 	"github.com/thefoxbyte/foxbyte/internal/host"
 	"github.com/thefoxbyte/foxbyte/internal/update"
 )
@@ -86,4 +89,39 @@ func parseUpgradeArgs(args []string) (host.UpdateOptions, error) {
 		return o, fmt.Errorf("unknown edition %q (expected enterprise or standard)", o.Edition)
 	}
 	return o, nil
+}
+
+// editionSwitchCmd is the job the console's Install button starts (`fox
+// _edition-switch --edition E`), detached, inside the engine. Not meant to be
+// typed: `fox upgrade` is the command for people.
+func editionSwitchCmd(args []string) {
+	o, err := parseUpgradeArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	if err := host.RunEditionSwitch(o.Edition); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// rerun runs the same command again on exe, the fox that just replaced this
+// one, and exits with its status. A replaced program carries on as the old one
+// otherwise, and would answer as the edition the person has just left.
+func rerun(exe string) {
+	cmd := exec.Command(exe, os.Args[1:]...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	// Once, not again: a replacement that somehow left the old edition behind
+	// must not send the new fox round the same loop.
+	cmd.Env = append(os.Environ(), brand.EnvName(host.EnvNoEditionSync)+"=1")
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }

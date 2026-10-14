@@ -778,7 +778,12 @@ th.expand-col, td.expand-col { width: 34px; padding-left: 8px; padding-right: 0;
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
-.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13.5px; font-weight: 500; }
+/* The crumbs give way, never the badge and Upgrade beside them: they could not
+   shrink, so on a narrow window the page name was drawn over the badge. The
+   section name goes first; the page name then ends in an ellipsis. */
+.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; font-size: 13.5px; font-weight: 500; }
+.crumbs > span { white-space: nowrap; flex-shrink: 0; }
+.crumbs > span:last-child { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .crumbs .sep { color: var(--faint); }
 .app-content { width: 100%; max-width: 1180px; margin: 0 auto; padding: 28px 28px 80px; }
 /* A page that manages its own space: the full width of the window, the full
@@ -1076,7 +1081,7 @@ body.row-resizing { cursor: row-resize; user-select: none; }
    Enterprise build with no licence reads Standard, because that is what it
    serves. Four tones, because the two between "standard" and "enterprise" are
    the ones somebody needs told about. */
-.topbar-end { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.topbar-end { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .edition-badge {
   display: inline-flex; align-items: center; gap: 6px; padding: 3px 11px;
   border-radius: var(--radius-pill); border: 1px solid var(--border-strong);
@@ -1140,7 +1145,14 @@ button.primary.sm.upgrade-btn { padding: 6px 14px; font-size: 13px; }
 .upgrade-modal .modal-note code { color: var(--text); }
 .upgrade-modal details.modal-more { margin: 4px 0 12px; }
 .upgrade-modal details.modal-more summary { cursor: pointer; color: var(--muted); font-size: var(--t-sm); }
+.upgrade-modal label.accept { display: flex; gap: 10px; align-items: flex-start; margin: 4px 0 12px;
+  font-size: var(--t-sm); color: var(--muted); line-height: 1.5; cursor: pointer; }
+.upgrade-modal label.accept input { margin-top: 3px; flex-shrink: 0; }
+.upgrade-modal label.accept a { color: var(--accent); }
+.upgrade-modal pre.switch-log { margin: 6px 0 12px; padding: 10px 12px; max-height: 180px; }
+.upgrade-modal pre.switch-log code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; }
 @media (max-width: 560px) {
   .topbar-end { gap: 6px; }
+  .crumbs > .muted, .crumbs > .sep { display: none; }
   .edition-badge { padding: 2px 8px; font-size: 11px; }
 }

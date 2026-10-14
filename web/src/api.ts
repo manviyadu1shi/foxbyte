@@ -355,6 +355,21 @@ export type LicenseActivation = {
 /** Activate a licence. Admin only; the engine refuses a forgery outright. */
 export const activateLicense = (text: string) =>
   req('POST', `${API}/api/license`, { license: text }) as Promise<LicenseActivation>
+
+// The Upgrade modal's Install button: the engine switches itself to the other
+// edition in the background, and says how it went (admins only).
+export interface EditionSwitch {
+  state: 'none' | 'running' | 'done' | 'failed'
+  edition: string
+  by?: string
+  started_at?: string
+  finished_at?: string
+  error?: string
+  log?: string[]
+}
+export const startEditionSwitch = (edition: 'enterprise' | 'standard', acceptLicense: boolean) =>
+  req('POST', `${API}/api/edition/switch`, { edition, accept_license: acceptLicense }) as Promise<{ state: string }>
+export const getEditionSwitch = () => req('GET', `${API}/api/edition/switch`) as Promise<EditionSwitch>
 export const getBranches = () => req('GET', `${API}/api/branches`) as Promise<Branch[]>
 // from: the branch to copy (default main).
 export const createBranch = (name: string, from?: string) =>

@@ -14,7 +14,7 @@
     "`bash scripts/rebrand.sh` for the prose and file names. See docs/branding.md."
   ],
   "product": "FoxByte",
-  "tagline": "the database that branches like code",
+  "tagline": "every schema change on record, every row change live",
   "cli": "fox",
   "slug": "foxbyte",
   "env_prefix": "FOX_",
