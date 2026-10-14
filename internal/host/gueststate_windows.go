@@ -19,6 +19,17 @@ func removeGuestState(name string) error {
 	return guestStateShell(guestStateRemoveScript(name), nil)
 }
 
+func pullGuestState(name string) ([]byte, error) {
+	if !wslInstalled() {
+		return nil, ErrNoEngine
+	}
+	d := currentDistro()
+	if !distroExists(d) {
+		return nil, ErrNoEngine
+	}
+	return guestStateOutput(exec.Command("wsl.exe", "-d", d, "--", "sh", "-c", guestStateReadScript(name)))
+}
+
 // guestStateShell runs a snippet in the distro as its default user — not
 // `wslRoot`, which the setup steps use because they need privilege. Here the
 // user is the point: the engine's state directory is the home of whoever runs

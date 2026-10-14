@@ -33,6 +33,11 @@ import (
 // the managed Linux VM, so it never tries to forward again.
 const envInGuest = "FOX_IN_GUEST"
 
+// EnvInGuest is that variable's name, for a test that needs a package to behave
+// as it would inside the VM. It is the contract between the launcher and the
+// engine rather than an internal detail, which is why it may be named outside.
+const EnvInGuest = envInGuest
+
 // localCommands run on the host machine itself and are never forwarded.
 var localCommands = map[string]bool{
 	"": true, "help": true, "-h": true, "--help": true,

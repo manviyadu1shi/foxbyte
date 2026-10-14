@@ -219,10 +219,17 @@ func main() {
 	//
 	// Quiet and best-effort. The case it repairs has already been reported once,
 	// and a licence is never a reason a database fails to come up.
+	//
+	// Reconciled rather than pushed: a licence activated in the console exists
+	// only in the engine, and pushing this machine's copy over it would undo an
+	// upgrade. The newer activation wins, both ways (syncLicenceWithEngine).
 	if sub := os.Args[1]; sub == "start" || sub == "up" {
-		if raw, err := os.ReadFile(license.Path()); err == nil {
-			_ = host.PushStateStartingEngine(license.FileName, raw)
-		}
+		syncLicenceWithEngine(true)
+	}
+	// And before `uninstall --keep-data` deletes the VM, whose copy may be the
+	// only one: the data being kept includes the licence that unlocks it.
+	if os.Args[1] == "uninstall" && hasFlag(os.Args[2:], "--keep-data") {
+		syncLicenceWithEngine(false)
 	}
 
 	// On macOS/Windows, forward engine commands into the managed Linux VM so the
@@ -433,14 +440,22 @@ func main() {
 		adminCmd(os.Args[2:])
 	case "policy":
 		policyCmd(os.Args[2:])
+	// The long-running processes keep their entitlement in step with the
+	// licence file (license.Watch), so a licence activated in the console or
+	// pushed from the host is honoured by all of them without a restart. The
+	// control plane starts its own, because it also records the change in the
+	// security log and the store for that is opened inside it.
 	case "serve":
+		license.Watch(nil)
 		must(agentapi.Serve(addrFlag(os.Args[2:], listenAddr("8088"))))
 	case "controlplane":
 		must(controlplane.Serve(addrFlag(os.Args[2:], listenAddr("8080"))))
 	case "gateway":
+		license.Watch(nil)
 		// The internal package is still named "proxy"; the user-facing command is "gateway".
 		must(proxy.Serve(addrFlag(os.Args[2:], listenAddr("6432")), durFlag(os.Args[2:], "--idle", 2*time.Minute)))
 	case "mcp":
+		license.Watch(nil)
 		// MCP server on stdio: an agent framework drives branches + the ledger.
 		// It acts as an API key's account, so the key comes first.
 		must(mcp.Serve(mcpKey(os.Args[2:])))

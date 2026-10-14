@@ -14,7 +14,10 @@
 // mean "licensed", and nothing would stop a build from unlocking itself.
 package edition
 
-import "sort"
+import (
+	"sort"
+	"sync/atomic"
+)
 
 // Feature names one thing the Enterprise edition unlocks. The string values are
 // what a licence file lists, what /api/status reports and what the console
@@ -63,23 +66,41 @@ func Features() []Feature {
 	return out
 }
 
-// entitled is supplied by the licence layer at start-up. Nil means no licence
-// has been presented, and an Enterprise build with no licence is a Standard
-// build in every observable way.
-var entitled func(Feature) bool
+// entitled is supplied by the licence layer. Nil means no licence has been
+// presented, and an Enterprise build with no licence is a Standard build in
+// every observable way.
+//
+// Atomic because it changes while the process runs. It used to be read once at
+// start-up, and then the console learned to activate a licence and the licence
+// layer learned to notice one arriving: both replace this from one goroutine
+// while every request reads it from others. A plain variable there is a data
+// race — one the race detector reports and a reader can lose to, seeing a
+// half-published entitlement.
+var entitled atomic.Pointer[func(Feature) bool]
 
 // SetEntitlement installs the licence layer's answer. Passing nil clears it,
-// which is how `fox license remove` takes the features away without a restart.
-func SetEntitlement(fn func(Feature) bool) { entitled = fn }
+// which is how a removed or lapsed licence takes the features away without a
+// restart.
+func SetEntitlement(fn func(Feature) bool) {
+	if fn == nil {
+		entitled.Store(nil)
+		return
+	}
+	entitled.Store(&fn)
+}
 
 // Has reports whether a feature may be used. It is false in a Standard build no
 // matter what a licence says, and false in an Enterprise build until a licence
 // says otherwise.
 func Has(f Feature) bool {
-	if !Enterprise || entitled == nil {
+	if !Enterprise {
 		return false
 	}
-	return entitled(f)
+	fn := entitled.Load()
+	if fn == nil {
+		return false
+	}
+	return (*fn)(f)
 }
 
 // Available is the features Has currently allows — what /api/status reports and

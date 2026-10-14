@@ -12,6 +12,7 @@ import (
 
 	"github.com/thefoxbyte/foxbyte/internal/auth"
 	"github.com/thefoxbyte/foxbyte/internal/edition"
+	"github.com/thefoxbyte/foxbyte/internal/host"
 	"github.com/thefoxbyte/foxbyte/internal/license"
 )
 
@@ -82,6 +83,31 @@ func TestLicenseEndpointWithNoLicence(t *testing.T) {
 		if _, ok := out[k]; ok {
 			t.Errorf("%s is reported when no licence is installed", k)
 		}
+	}
+}
+
+// Who may activate, and what each viewer is told to do. The console offers the
+// Upgrade button from you_are_admin, so it has to be right in both directions:
+// shown to an admin it works, shown to anyone else it ends in a refusal. And
+// the advice under it names the button to the person who can press it, and
+// names who can to everyone else.
+func TestLicenseEndpointSaysWhoMayActivate(t *testing.T) {
+	s, admin, alice, _ := withACL(t)
+	adm, user := getLicense(t, s, admin), getLicense(t, s, alice)
+	if adm["you_are_admin"] != true {
+		t.Errorf("an admin was told you_are_admin = %v", adm["you_are_admin"])
+	}
+	if user["you_are_admin"] != false {
+		t.Errorf("a non-admin was told you_are_admin = %v", user["you_are_admin"])
+	}
+	if !edition.Enterprise {
+		return // a Standard build has no licence advice to give
+	}
+	if a, _ := adm["action"].(string); !strings.Contains(a, "Upgrade") {
+		t.Errorf("an admin is not pointed at the Upgrade button: %q", a)
+	}
+	if a, _ := user["action"].(string); !strings.Contains(a, "ask an admin") || strings.Contains(a, "license activate") {
+		t.Errorf("a non-admin is not told who can act, or is handed a command they cannot use: %q", a)
 	}
 }
 
@@ -233,28 +259,36 @@ func TestActivateRefusesWhatIsNotALicence(t *testing.T) {
 
 // The notes are what is left to do, and appear only when there is something.
 //
-// The Gateway and the Agent API read the entitlement when they start, so a
-// licence the control plane is already honouring is not yet honoured by them.
-// Saying so is the difference between "it worked" and "it worked, and here is
-// why one thing still refuses you".
+// They used to tell the admin to restart the engine, because the Gateway and
+// the Agent API read the entitlement only when they started. Every long-running
+// process now watches the licence file, so no note may ask for a restart: one
+// that is not needed teaches people to restart a database for nothing.
 func TestActivationNotes(t *testing.T) {
-	t.Run("a licence that unlocks mentions the other processes", func(t *testing.T) {
-		notes := activationNotes(license.Status{State: license.Active,
-			License: license.License{Features: []string{"realtime"}}})
-		var found bool
-		for _, n := range notes {
-			if strings.Contains(n, "Restart") && strings.Contains(n, "Gateway") {
-				found = true
+	t.Run("nothing asks for a restart any more", func(t *testing.T) {
+		for _, guest := range []string{"", "1"} {
+			t.Setenv(host.EnvInGuest, guest)
+			for _, n := range activationNotes() {
+				if strings.Contains(strings.ToLower(n), "restart") {
+					t.Errorf("a note asks for a restart that is no longer needed: %q", n)
+				}
 			}
 		}
-		if !found {
-			t.Errorf("notes do not mention restarting the other processes: %v", notes)
+	})
+	t.Run("on the host itself there is nothing left to do", func(t *testing.T) {
+		t.Setenv(host.EnvInGuest, "")
+		if notes := activationNotes(); len(notes) != 0 {
+			t.Errorf("notes on a machine with one copy: %v", notes)
 		}
 	})
-	t.Run("one that does not unlock does not promise a restart will help", func(t *testing.T) {
-		for _, n := range activationNotes(license.Status{State: license.Invalid}) {
-			if strings.Contains(n, "Restart") {
-				t.Errorf("an unusable licence was told a restart would help: %q", n)
+	t.Run("inside the VM it says when the host keeps its own copy", func(t *testing.T) {
+		t.Setenv(host.EnvInGuest, "1")
+		notes := activationNotes()
+		if len(notes) != 1 {
+			t.Fatalf("want one note inside the VM, got %v", notes)
+		}
+		for _, want := range []string{"start", "license show", "rebuilding"} {
+			if !strings.Contains(notes[0], want) {
+				t.Errorf("the note does not mention %q: %q", want, notes[0])
 			}
 		}
 	})
