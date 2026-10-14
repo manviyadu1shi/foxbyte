@@ -2,7 +2,12 @@
 
 package branch
 
-import "github.com/thefoxbyte/foxbyte/internal/ledger"
+import (
+	"bytes"
+	"strings"
+
+	"github.com/thefoxbyte/foxbyte/internal/ledger"
+)
 
 // The few primitives the paid edition needs from this package.
 //
@@ -26,6 +31,35 @@ func ExecSQL(target, sql string) error { return psqlExec(target, sql) }
 // ask the database a question rather than tell it something.
 func QuerySQL(target, sql string) (string, error) {
 	return capture("docker", "exec", container(target), "psql", "-U", pgUser, "-d", pgDatabase, "-tAc", sql)
+}
+
+// ExecSQLAs is ExecSQL on behalf of a. For an ordinary account the SQL runs as
+// that account's own role with psql's backslash commands off (see As); for the
+// operator it is ExecSQL.
+func ExecSQLAs(target, sql string, a As) error {
+	if !a.confined() {
+		return ExecSQL(target, sql)
+	}
+	return pipeInto(target, a.restricted(strings.NewReader(sql+"\n")),
+		"psql", "-q", "-U", a.Account, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1")
+}
+
+// QuerySQLAs is QuerySQL on behalf of a, as ExecSQLAs is to ExecSQL. On failure
+// the output is psql's error.
+func QuerySQLAs(target, sql string, a As) (string, error) {
+	if !a.confined() {
+		return QuerySQL(target, sql)
+	}
+	cmd := execSudo("docker", "exec", "-i", "-e", pgImportOptions, container(target),
+		"psql", "-q", "-U", a.Account, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1", "-tA")
+	cmd.Stdin = a.restricted(strings.NewReader(sql + "\n"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return strings.TrimSpace(stderr.String()), err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // QuoteLiteral renders s as a SQL string literal.

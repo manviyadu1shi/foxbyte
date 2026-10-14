@@ -63,11 +63,11 @@ type RunResult struct {
 // the paid half registers itself here instead, and the free half keeps the
 // types because they are named by untagged code in cmd/fox and the control
 // plane. A struct definition is not the feature; the engine is.
-var runPipeline func(*Progress, PipelineSpec, string) (RunResult, error)
+var runPipeline func(*Progress, PipelineSpec, string, As) (RunResult, error)
 
 // SetPipelineRunner installs the engine. Called from enterprise/pipeline's
 // init, and from nowhere else.
-func SetPipelineRunner(fn func(*Progress, PipelineSpec, string) (RunResult, error)) {
+func SetPipelineRunner(fn func(*Progress, PipelineSpec, string, As) (RunResult, error)) {
 	runPipeline = fn
 }
 
@@ -76,6 +76,12 @@ func SetPipelineRunner(fn func(*Progress, PipelineSpec, string) (RunResult, erro
 // into `public`, then run the tests. Test failures set RunResult.Failed but the
 // data is left in place for inspection.
 func RunPipeline(p *Progress, spec PipelineSpec, branch string) (RunResult, error) {
+	return RunPipelineAs(p, spec, branch, As{})
+}
+
+// RunPipelineAs is RunPipeline on behalf of a: an ordinary account's pipeline
+// extracts, transforms and tests as that account (see As).
+func RunPipelineAs(p *Progress, spec PipelineSpec, branch string, a As) (RunResult, error) {
 	// `fox import` is deliberately not gated: migrating data in is onboarding,
 	// not ETL, and charging for the way in is a bad trade for both sides.
 	if err := requireFeature(edition.Pipelines); err != nil {
@@ -88,5 +94,5 @@ func RunPipeline(p *Progress, spec PipelineSpec, branch string) (RunResult, erro
 	if runPipeline == nil {
 		return RunResult{}, ErrPipelinesNotLicensed
 	}
-	return runPipeline(p, spec, branch)
+	return runPipeline(p, spec, branch, a)
 }

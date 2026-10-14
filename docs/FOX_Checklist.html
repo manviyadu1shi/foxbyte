@@ -457,7 +457,8 @@
       <li class="ok">Collection → typed table, exact name</li><li class="ok">Nested objects / arrays kept as jsonb</li></ul></td><td class="tb">VM §9, §10</td></tr>
     <tr data-id="I5" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">I5</td><td><b>From a .sql dump</b><ul class="subs">
       <li class="ok">Runs the dump into a new branch</li><li class="ok">Fails listing every failed statement (instance kept)</li>
-      <li class="ok">Same for Postgres imports (I1)</li><li class="ok">Automated test</li></ul></td><td class="tb">Unit; VM §11</td></tr>
+      <li class="ok">Same for Postgres imports (I1)</li><li class="ok">Automated test</li>
+      <li class="ok">An ordinary account's import runs as that account, backslash commands off</li></ul></td><td class="tb">Unit; VM §11, §11h</td></tr>
     <tr data-id="I6" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">I6</td><td><b>From JSON / NDJSON</b><ul class="subs">
       <li class="ok">Columns inferred from top-level keys</li><li class="ok">An invalid document fails the import, naming its element or line</li></ul></td><td class="tb">Unit; VM §10, §11</td></tr>
     <tr data-id="I7" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I7</td><td><b>From CSV</b><ul class="subs">
@@ -487,7 +488,7 @@
     <tr><th></th><th>ID</th><th>Feature · sub-features</th><th>Tested by</th></tr>
     <tr data-id="J1" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">J1</td><td><b>Pipeline engine</b><ul class="subs">
       <li class="ok">Extract → raw schema → SQL models → tests, in a fresh branch</li><li class="ok"><code>ref()</code> / <code>source()</code> templating</li>
-      <li class="next">Dependency graph</li><li class="next">Incremental models</li><li class="next">Scheduling</li><li class="ok">A run replaces only a branch the pipeline made</li><li class="ok">API sources are connection strings, never server paths</li></ul></td><td class="tb">Unit; VM §9</td></tr>
+      <li class="next">Dependency graph</li><li class="next">Incremental models</li><li class="next">Scheduling</li><li class="ok">A run replaces only a branch the pipeline made</li><li class="ok">API sources are connection strings, never server paths</li><li class="ok">An ordinary account's run is its own: extract, models and tests (unit)</li></ul></td><td class="tb">Unit; VM §9</td></tr>
     <tr data-id="J2" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">J2</td><td><b>Data-quality tests</b><ul class="subs">
       <li class="ok">not_null, unique, accepted_values, row_count_min, custom</li><li class="ok">Failure → exit 1, data kept</li></ul></td><td class="tb">Unit; VM §9</td></tr>
     <tr data-id="J3" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">J3</td><td><b>Stored pipelines &amp; run history</b><ul class="subs">

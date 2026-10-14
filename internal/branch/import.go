@@ -73,15 +73,21 @@ func Import(source, target string) (string, error) {
 
 // ImportTo is Import with an explicit progress sink.
 func ImportTo(p *Progress, source, target string) (string, error) {
+	return ImportToAs(p, source, target, As{})
+}
+
+// ImportToAs is ImportTo on behalf of a: an ordinary account's import runs what
+// the source supplies as that account (see As).
+func ImportToAs(p *Progress, source, target string, a As) (string, error) {
 	switch {
 	case isPostgresDSN(source):
-		return importInstance(p, target, defaultTargetName(source), "PostgreSQL source (pg_dump)",
-			func(t string) error { return loadPostgres(p, t, source) })
+		return importInstance(p, target, defaultTargetName(source), "PostgreSQL source (pg_dump)", a,
+			func(t string) error { return loadPostgres(p, t, source, a) })
 	case hasScheme(source, "mysql", "mariadb"):
-		return importInstance(p, target, defaultTargetName(source), "MySQL/MariaDB source (pgloader)",
-			func(t string) error { return loadMySQL(p, t, source) })
+		return importInstance(p, target, defaultTargetName(source), "MySQL/MariaDB source (pgloader)", a,
+			func(t string) error { return loadMySQL(p, t, source, a) })
 	case hasScheme(source, "mongodb", "mongodb+srv"):
-		return importInstance(p, target, defaultTargetName(source), "MongoDB source (collections → JSONB)",
+		return importInstance(p, target, defaultTargetName(source), "MongoDB source (collections → JSONB)", a,
 			func(t string) error { return loadMongo(p, t, source) })
 	}
 	info, err := os.Stat(source)
@@ -97,7 +103,7 @@ func ImportTo(p *Progress, source, target string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	return ImportReaderTo(p, f, kind, filepath.Base(source), target)
+	return ImportReaderToAs(p, f, kind, filepath.Base(source), target, a)
 }
 
 // ImportReader loads a stream (a .sql/.csv/.json file's contents, from stdin or a
@@ -109,15 +115,20 @@ func ImportReader(r io.Reader, kind sourceKind, srcname, target string) (string,
 
 // ImportReaderTo is ImportReader with an explicit progress sink.
 func ImportReaderTo(p *Progress, r io.Reader, kind sourceKind, srcname, target string) (string, error) {
+	return ImportReaderToAs(p, r, kind, srcname, target, As{})
+}
+
+// ImportReaderToAs is ImportReaderTo on behalf of a (see As).
+func ImportReaderToAs(p *Progress, r io.Reader, kind sourceKind, srcname, target string, a As) (string, error) {
 	stem := strings.TrimSuffix(srcname, filepath.Ext(srcname))
 	// The TABLE keeps the source name verbatim (schema fidelity); the instance name
 	// must be filesystem/docker-safe, so it stays sanitized.
 	table := stem
 	instance := "import-" + sanitizeIdent(stem)
-	return importInstance(p, target, instance, describeKind(kind, srcname), func(t string) error {
+	return importInstance(p, target, instance, describeKind(kind, srcname), a, func(t string) error {
 		switch kind {
 		case srcSQL:
-			return loadSQL(p, t, r)
+			return loadSQL(p, t, r, a)
 		case srcCSV:
 			return loadCSV(p, t, r, table)
 		case srcJSON:
@@ -129,7 +140,7 @@ func ImportReaderTo(p *Progress, r io.Reader, kind sourceKind, srcname, target s
 
 // importInstance creates the target instance, gives it a clean public schema,
 // runs the loader, and prints a summary.
-func importInstance(p *Progress, target, defName, desc string, load func(string) error) (string, error) {
+func importInstance(p *Progress, target, defName, desc string, a As, load func(string) error) (string, error) {
 	if target == "" {
 		target = defName
 	}
@@ -145,9 +156,14 @@ func importInstance(p *Progress, target, defName, desc string, load func(string)
 	if err := prepareTarget(target); err != nil {
 		return target, fmt.Errorf("prepare target: %w", err)
 	}
+	done, err := beginAs(target, a)
+	if err != nil {
+		return target, err
+	}
+	defer done()
 	p.Logf("Importing %s → %q…\n", desc, target)
 	if err := load(target); err != nil {
-		return target, fmt.Errorf("import failed: %w", err)
+		return target, fmt.Errorf("import failed: %w", explainAs(a, err))
 	}
 	// A finished load that produced no tables is a failure, not a success — the
 	// usual cause is the wrong database named in the source. (Loaders with a more
@@ -173,6 +189,14 @@ func ImportContinuous(source, target string) (string, error) {
 
 // ImportContinuousTo is ImportContinuous with an explicit progress sink.
 func ImportContinuousTo(p *Progress, source, target string) (string, error) {
+	return ImportContinuousToAs(p, source, target, As{})
+}
+
+// ImportContinuousToAs is ImportContinuousTo on behalf of a: an ordinary
+// account's schema copy runs as that account (see As). The subscription is
+// still made by the superuser, since only one may make it; it carries rows,
+// not statements.
+func ImportContinuousToAs(p *Progress, source, target string, a As) (string, error) {
 	if !isPostgresDSN(source) {
 		return "", fmt.Errorf("--continuous requires a postgres:// source (logical replication)")
 	}
@@ -188,15 +212,21 @@ func ImportContinuousTo(p *Progress, source, target string) (string, error) {
 	if err := prepareTarget(target); err != nil {
 		return target, fmt.Errorf("prepare target: %w", err)
 	}
+	done, err := beginAs(target, a)
+	if err != nil {
+		return target, err
+	}
+	defer done()
 	// Copy the schema (structure only) first: logical replication replicates data,
 	// not DDL, so the subscriber needs the tables to exist before it can populate
 	// them. --no-publications/--no-subscriptions keep the source's own replication
 	// objects out of the target.
 	p.Logf("Copying schema (structure only)…\n")
 	schemaScript := fmt.Sprintf("set -euo pipefail; pg_dump %s --schema-only --no-owner --no-acl --no-comments "+
-		"--no-publications --no-subscriptions | psql -q -U %s -d %s", shellQuote(source), pgUser, pgDatabase)
+		"--no-publications --no-subscriptions%s | psql -q -U %s -d %s",
+		shellQuote(source), dumpRestrictFlag(a), shellQuote(a.psqlRole()), pgDatabase)
 	if err := run("docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", schemaScript); err != nil {
-		return target, fmt.Errorf("copy schema from source: %w", err)
+		return target, fmt.Errorf("copy schema from source: %w", explainAs(a, err))
 	}
 	// If the schema copy produced no tables, the source is empty or the wrong
 	// database was named — fail before setting up an empty subscription.
@@ -342,10 +372,10 @@ func prepareTarget(target string) error {
 		"-c", "ALTER DEFAULT PRIVILEGES FOR ROLE "+pgUser+" IN SCHEMA public GRANT ALL ON SEQUENCES TO db_client;")
 }
 
-func loadPostgres(p *Progress, target, dsn string) error {
+func loadPostgres(p *Progress, target, dsn string, a As) error {
 	p.Logf("  running pg_dump | psql (schema + data)…\n")
-	script := fmt.Sprintf("set -euo pipefail; pg_dump %s --no-owner --no-acl --no-comments | psql -q -U %s -d %s",
-		shellQuote(dsn), pgUser, pgDatabase)
+	script := fmt.Sprintf("set -euo pipefail; pg_dump %s --no-owner --no-acl --no-comments%s | psql -q -U %s -d %s",
+		shellQuote(dsn), dumpRestrictFlag(a), shellQuote(a.psqlRole()), pgDatabase)
 	// psql exits 0 even when statements fail, so its errors are counted instead.
 	c, err := runCollectingErrors(nil, "docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", script)
 	return c.failure(target, err)
@@ -354,19 +384,27 @@ func loadPostgres(p *Progress, target, dsn string) error {
 // loadMySQL migrates a MySQL/MariaDB source using pgloader (schema + data + type
 // mapping), run as a throwaway container on the shared network so it can reach
 // both the source and the target branch's Postgres.
-func loadMySQL(p *Progress, target, dsn string) error {
+func loadMySQL(p *Progress, target, dsn string, a As) error {
 	// pgloader can't read MySQL 8.x (its caching_sha2_password handshake and its
 	// information_schema layout), so route those to a mysqldump-based path whose
 	// client speaks the modern protocol. MariaDB and MySQL ≤5.7 stay on pgloader,
 	// which maps their indexes/constraints more richly.
 	if mysqlNeedsNative(dsn) {
-		return loadMySQLNative(p, target, dsn)
+		return loadMySQLNative(p, target, dsn, a)
 	}
 	if err := ensurePgloaderImage(p); err != nil {
 		return fmt.Errorf("prepare pgloader: %w", err)
 	}
 	dsn = strings.Replace(dsn, "mariadb://", "mysql://", 1)
 	pgTarget := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", pgUser, pgPass(), container(target), pgDatabase)
+	if a.confined() {
+		// pgloader logs in over the network, where the account's own role has no
+		// password it could be given; db_client is what that role acts as anyway.
+		if err := EnsureAppRole(target); err != nil {
+			return err
+		}
+		pgTarget = fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", ClientRole, ClientRolePassword(), container(target), pgDatabase)
+	}
 	p.Logf("  running pgloader (schema + data + type mapping)…\n")
 	// pgloader exits 0 even when it fails outright (a bad connection) or silently
 	// loads nothing (e.g. it can't read a MySQL 8.0 source's metadata), so the exit
@@ -462,7 +500,7 @@ func mysqlNeedsNative(dsn string) bool {
 // loadMySQLNative imports a MySQL 8.x source: it reads the schema from
 // information_schema (reliable across versions) and streams data via mysqldump,
 // translating MySQL's dialect/escaping for Postgres.
-func loadMySQLNative(p *Progress, target, dsn string) error {
+func loadMySQLNative(p *Progress, target, dsn string, a As) error {
 	c := parseMyDSN(dsn)
 	if c.db == "" {
 		return fmt.Errorf("the MySQL connection string must include a database name (…/dbname)")
@@ -488,8 +526,8 @@ func loadMySQLNative(p *Progress, target, dsn string) error {
 		}
 		ddl.WriteString(stmt)
 	}
-	if err := pipeInto(target, strings.NewReader(ddl.String()),
-		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
+	if err := pipeInto(target, a.restricted(strings.NewReader(ddl.String())),
+		"psql", "-q", "-U", a.psqlRole(), "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
 		return fmt.Errorf("create tables: %w", err)
 	}
 
@@ -501,8 +539,8 @@ func loadMySQLNative(p *Progress, target, dsn string) error {
 		return err
 	}
 	preamble := "SET client_encoding='UTF8';\nSET standard_conforming_strings=off;\nSET backslash_quote=on;\nSET client_min_messages=warning;\n"
-	if err := pipeInto(target, strings.NewReader(preamble+data),
-		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
+	if err := pipeInto(target, a.restricted(strings.NewReader(preamble+data)),
+		"psql", "-q", "-U", a.psqlRole(), "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
 		return fmt.Errorf("load rows: %w", err)
 	}
 	return nil
@@ -735,11 +773,11 @@ func hasScheme(s string, schemes ...string) bool {
 
 func jsStr(s string) string { b, _ := json.Marshal(s); return string(b) }
 
-func loadSQL(p *Progress, target string, r io.Reader) error {
+func loadSQL(p *Progress, target string, r io.Reader, a As) error {
 	p.Logf("  running the .sql dump through psql…\n")
 	// The whole dump runs; statements that failed make the import fail afterwards.
-	c, err := runCollectingErrors(r, "docker", "exec", "-i", "-e", pgImportOptions, container(target),
-		"psql", "-q", "-U", pgUser, "-d", pgDatabase)
+	c, err := runCollectingErrors(a.restricted(r), "docker", "exec", "-i", "-e", pgImportOptions, container(target),
+		"psql", "-q", "-U", a.psqlRole(), "-d", pgDatabase)
 	return c.failure(target, err)
 }
 
@@ -777,7 +815,9 @@ func (c *psqlErrorCollector) flush() {
 }
 
 func (c *psqlErrorCollector) line(l string) {
-	if !strings.Contains(l, "ERROR:") && !strings.Contains(l, "FATAL:") {
+	// The last is psql refusing a backslash command in a confined load (As): a
+	// command that did not run is a statement that failed.
+	if !strings.Contains(l, "ERROR:") && !strings.Contains(l, "FATAL:") && !strings.Contains(l, "backslash commands are restricted") {
 		return // NOTICE, WARNING, and the LINE/DETAIL/HINT context around an error
 	}
 	c.count++

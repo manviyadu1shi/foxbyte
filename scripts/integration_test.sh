@@ -1281,6 +1281,52 @@ assert_eq "the TRUNCATE guardrail still fires inside a script" "$(jq_py '"yes" i
 assert_eq "…and the rows are still there" "$(pg pg-main 'SELECT count(*) FROM ms_demo')" "3"
 pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS ms_demo" >/dev/null 2>&1
 
+echo "### 11h. an ordinary account's import runs as that account"
+# An admin's import runs as the superuser, as it always has. Anyone else's runs
+# what the source supplied as their own role, with psql's backslash commands
+# switched off: it can do on the new branch what they could do there through the
+# Gateway, and no more. ivy is an ordinary account.
+$S user delete ivy@foxbyte.dev >/dev/null 2>&1; printf 'password123\n' | $S user create ivy@foxbyte.dev >/dev/null 2>&1
+KI="$($S apikey create ivy@foxbyte.dev it 2>/dev/null | grep -o 'key_[A-Za-z0-9_-]*')"
+for b in ivyimp ivyimp2 ivyext admimp admext; do $S branch delete "$b" >/dev/null 2>&1; done
+up() { # up <key> <file> <target> -> the SSE stream
+  curl -sk -N -H "Authorization: Bearer $1" -F "file=@$2" -F "target=$3" https://localhost:8080/api/import/file; }
+IVYSQL="$(mktemp -d)/ivy.sql"
+printf 'CREATE SCHEMA ivy_s;\nCREATE TABLE ivy_t (a int);\nINSERT INTO ivy_t VALUES (1);\n' > "$IVYSQL"
+assert_contains "ivy imports a .sql script" "$(up "$KI" "$IVYSQL" ivyimp)" "event: done"
+assert_eq "…its tables belong to db_client, as through the Gateway, not to the superuser" \
+  "$(pg pg-ivyimp "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='ivy_t'")|$(pg pg-ivyimp "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='ivy_s'")" "db_client|db_client"
+assert_eq "…the Blackbox names ivy" \
+  "$(pg pg-ivyimp "SELECT count(*) FROM bb.schema_ledger WHERE object_identity='public.ivy_t' AND actor='ivy@foxbyte.dev'")" "1"
+assert_eq "…the leave to make schemas lasted only for the import" \
+  "$(pg pg-ivyimp "SELECT has_database_privilege('db_client', current_database(), 'CREATE')")" "f"
+assert_eq "…and ivy reads it through the Gateway" \
+  "$(PGPASSWORD="$KI" psql "$GATEWAY/ivyimp?sslmode=require" -tAc 'select a from ivy_t' 2>/dev/null)" "1"
+assert_contains "an admin's import of the same script runs as the superuser, as before" "$(up "$KEY" "$IVYSQL" admimp)" "event: done"
+assert_eq "…so its tables are the superuser's" "$(pg pg-admimp "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='ivy_t'")" "dbadmin"
+# A file a current pg_dump wrote restricts itself, after its header comments,
+# and loads without complaint. Shaped by hand rather than dumped from a branch:
+# a FoxByte table carries the Blackbox's triggers, and a dump of one collides
+# with the ones the new branch adds, for an admin as much as for ivy.
+DUMP="$(mktemp -d)/dump.sql"
+printf -- '--\n-- PostgreSQL database dump\n--\n\n\\restrict Kfoxdump1\n\nSET statement_timeout = 0;\nCREATE TABLE public.ivy_d (a integer);\nCOPY public.ivy_d (a) FROM stdin;\n7\n\\.\n\n\\unrestrict Kfoxdump1\n' > "$DUMP"
+assert_contains "ivy imports a pg_dump-shaped file cleanly" "$(up "$KI" "$DUMP" ivyimp2)" "event: done"
+assert_eq "…with its row, copied in" "$(pg pg-ivyimp2 'SELECT a FROM ivy_d')" "7"
+# psql's own commands are not SQL, and no role limits them: in ivy's import they
+# do not run. \echo is harmless; the point is that it is refused.
+printf 'CREATE TABLE ivy_m (a int);\n\\echo fox-meta-ran\n' > "$IVYSQL"
+OUT="$(up "$KI" "$IVYSQL" ivyext)"
+assert_eq "a psql command in ivy's script is refused and counted as a failure" \
+  "$(echo "$OUT" | grep -c 'backslash commands are restricted')|$(echo "$OUT" | grep -c '1 statement(s) failed')" "1|1"
+$S branch delete ivyext >/dev/null 2>&1
+printf 'CREATE EXTENSION IF NOT EXISTS vector;\nCREATE TABLE ivy_v (a int);\n' > "$IVYSQL"
+OUT="$(up "$KI" "$IVYSQL" ivyext)"
+assert_eq "an extension only a superuser may make is refused for ivy, and the error says to ask an admin" \
+  "$(echo "$OUT" | grep -c 'permission denied to create extension')|$(echo "$OUT" | grep -c 'needs an admin')" "1|1"
+assert_contains "…an admin's import makes it, as before" "$(up "$KEY" "$IVYSQL" admext)" "event: done"
+for b in ivyimp ivyimp2 ivyext admimp admext; do $S branch delete "$b" >/dev/null 2>&1; done
+$S user delete ivy@foxbyte.dev >/dev/null 2>&1
+
 echo "### 12. fox uninstall (B1)"
 # Removal used to be a list of commands to run by hand. This runs last: it takes
 # the stack apart, so nothing after it has a stack to use.

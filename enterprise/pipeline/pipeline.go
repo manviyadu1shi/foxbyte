@@ -42,7 +42,11 @@ var (
 )
 
 // run is the engine. branch.RunPipeline checks the licence and calls this.
-func run(p *branch.Progress, spec branch.PipelineSpec, branchName string) (branch.RunResult, error) {
+//
+// as is whose run it is. For an ordinary account, the extract, every model and
+// every test run as that account (see branch.As); the staging step between
+// them is FoxByte's own SQL and stays with the superuser.
+func run(p *branch.Progress, spec branch.PipelineSpec, branchName string, as branch.As) (branch.RunResult, error) {
 	res := branch.RunResult{Branch: branchName}
 	if strings.TrimSpace(spec.Source) == "" {
 		return res, fmt.Errorf("pipeline needs a source connection string")
@@ -51,7 +55,7 @@ func run(p *branch.Progress, spec branch.PipelineSpec, branchName string) (branc
 	// 1. Extract + land raw (into a fresh branchName's public schema).
 	p.Logf("== Extract ==\n")
 	_ = branch.Delete(branchName) // refresh the target instance if a previous run left one
-	if _, err := branch.ImportTo(p, spec.Source, branchName); err != nil {
+	if _, err := branch.ImportToAs(p, spec.Source, branchName, as); err != nil {
 		return res, fmt.Errorf("extract: %w", err)
 	}
 
@@ -65,6 +69,13 @@ func run(p *branch.Progress, spec branch.PipelineSpec, branchName string) (branc
 	p.Logf("== Stage raw ==\n")
 	if err := branch.ExecSQL(branchName, `DROP SCHEMA IF EXISTS raw CASCADE; ALTER SCHEMA public RENAME TO raw; CREATE SCHEMA public;`); err != nil {
 		return res, fmt.Errorf("stage raw: %w", err)
+	}
+	// The new public is the superuser's and bare. An account's models are made
+	// as that account, which acts as db_client, so db_client needs to use it.
+	if as.Account != "" {
+		if err := branch.ExecSQL(branchName, `GRANT USAGE, CREATE ON SCHEMA public TO `+branch.ClientRole+`;`); err != nil {
+			return res, fmt.Errorf("stage raw: %w", err)
+		}
 	}
 
 	// 3. Transform: materialize each model in order.
@@ -81,7 +92,7 @@ func run(p *branch.Progress, spec branch.PipelineSpec, branchName string) (branc
 		p.Logf("  model %q (%s)…\n", name, strings.ToLower(mat))
 		p.Report(i+1, len(spec.Models), "model "+name)
 		ddl := fmt.Sprintf(`CREATE %s public.%s AS %s;`, mat, branch.QuoteIdent(name), renderSQL(m.SQL))
-		if err := branch.ExecSQL(branchName, ddl); err != nil {
+		if err := branch.ExecSQLAs(branchName, ddl, as); err != nil {
 			return res, fmt.Errorf("model %q: %w", name, err)
 		}
 		res.Models = append(res.Models, name)
@@ -92,7 +103,7 @@ func run(p *branch.Progress, spec branch.PipelineSpec, branchName string) (branc
 		p.Logf("== Test (%d) ==\n", len(spec.Tests))
 	}
 	for _, t := range spec.Tests {
-		tr := runTest(branchName, t)
+		tr := runTest(branchName, t, as)
 		res.Tests = append(res.Tests, tr)
 		if tr.Passed {
 			p.Logf("  [PASS] %s\n", tr.Name)
@@ -149,13 +160,13 @@ func testQuery(t branch.PipelineTest) (string, error) {
 }
 
 // runTest evaluates one assertion against the branchName (0 violating rows = pass).
-func runTest(branchName string, t branch.PipelineTest) branch.TestResult {
+func runTest(branchName string, t branch.PipelineTest, as branch.As) branch.TestResult {
 	name := testName(t)
 	query, err := testQuery(t)
 	if err != nil {
 		return branch.TestResult{Name: name, Passed: false, Detail: err.Error()}
 	}
-	out, err := branch.QuerySQL(branchName, query)
+	out, err := branch.QuerySQLAs(branchName, query, as)
 	if err != nil {
 		return branch.TestResult{Name: name, Passed: false, Detail: "query error: " + strings.TrimSpace(out)}
 	}
