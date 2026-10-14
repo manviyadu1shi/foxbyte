@@ -408,7 +408,7 @@
       <li class="ok">Help and output say it's a point-in-time restore of main</li><li class="ok">Points to H13 for a branch from before a change</li></ul></td><td class="tb">Unit (help text); VM §3 (the restore)</td></tr>
     <tr data-id="H8" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">H8</td><td><b>Override permission (db_admin) &amp; upgrade</b><ul class="subs">
       <li class="ok"><code>fox admin grant|revoke|list</code></li><li class="ok">First user granted automatically</li>
-      <li class="ok"><code>fox blackbox upgrade [--all]</code></li><li class="ok">Grant / revoke from the web (admins only)</li></ul></td><td class="tb">v2 §1b, §6</td></tr>
+      <li class="ok"><code>fox blackbox upgrade [--all]</code></li><li class="ok">Grant / revoke from the web (admins only)</li><li class="ok">A grant or revoke reaches every server process within a second</li></ul></td><td class="tb">v2 §1b, §6; VM §1d</td></tr>
     <tr data-id="H9" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">H9</td><td><b>Blackbox 2.0 capture</b><ul class="subs">
       <li class="ok">Transaction id and WAL position per entry</li><li class="ok">Task, tool-call hash, override use</li>
       <li class="ok">Fail-safe, append-only</li><li class="ok">Kill switch not settable by clients</li></ul></td><td class="tb">Unit; v2 §2</td></tr>
@@ -593,7 +593,7 @@
       </ul></td><td class="tb">CI; no end-to-end WSL install test yet</td></tr>
     <tr data-id="M4" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">M4</td><td><b>Releases &amp; GHCR image</b><ul class="subs">
       <li class="ok">Binaries for 5 platforms + fox-verify</li><li class="ok">SHA256SUMS merged safely between jobs</li>
-      <li class="ok">Fails unless <code>fox update</code>'s files are published</li><li class="ok">Multi-arch Postgres image on GHCR</li><li class="ok">Actions pinned by SHA; signed SHA256SUMS; build attestations; SBOM</li><li class="ok">Run for a real release on GitHub, and verified afterwards</li></ul></td><td class="tb">Script tests in CI</td></tr>
+      <li class="ok">Fails unless <code>fox update</code>'s files are published</li><li class="ok">Multi-arch Postgres image on GHCR</li><li class="ok">Actions pinned by SHA; signed SHA256SUMS; build attestations; SBOM</li><li class="ok">Run for a real release on GitHub, and verified afterwards</li><li class="ok">go.mod names the toolchain releases use (go1.26.9)</li></ul></td><td class="tb">Script tests in CI</td></tr>
     <tr data-id="M5" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">M5</td><td><b>WSL distro &amp; ZFS builds</b><ul class="subs">
       <li class="ok">Prebuilt distro image</li><li class="ok">Downloaded and verified by the installer (seen on Windows)</li><li class="ok">Preloaded image tagged as the engine runs it</li>
       <li class="ok">Imported on a fresh Windows install; preloaded images loaded</li><li class="ok">Published zstd-compressed, with the gzip size measured beside it in every build log</li></ul></td><td class="tb">Actions artifacts; Pester; Windows run 16 Sep; the zstd unpack is unit-tested only, not run on a real Windows install</td></tr>

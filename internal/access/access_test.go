@@ -81,3 +81,48 @@ func TestAdminIsCachedBriefly(t *testing.T) {
 		t.Errorf("a revoked admin was still an admin after the TTL (calls %d)", calls)
 	}
 }
+
+// A grant or revoke the security log records reaches the cache within a
+// second, wherever it was made, instead of when the old answer expires.
+func TestARecordedRevokeBitesWithinASecond(t *testing.T) {
+	s, _, alice, _ := storeWith(t)
+	calls, admin := 0, true
+	c := NewWith(s, func(string) bool { calls++; return admin })
+	now := time.Unix(1000, 0)
+	c.now = func() time.Time { return now }
+	if !c.Admin(alice) {
+		t.Fatal("not an admin to begin with")
+	}
+
+	// Revoked elsewhere (the CLI, another process), and recorded as such.
+	admin = false
+	s.Audit(auth.EvAdminRevoked, "root@x.com", alice.Email, "", "branch main")
+
+	now = now.Add(epochEvery / 2) // the log is not asked again this soon
+	if !c.Admin(alice) || calls != 1 {
+		t.Fatalf("asked inside epochEvery (calls %d)", calls)
+	}
+	now = now.Add(epochEvery) // well inside adminTTL
+	if c.Admin(alice) {
+		t.Error("a recorded revoke had not bitten after a second")
+	}
+	if calls != 2 {
+		t.Errorf("calls %d, want 2", calls)
+	}
+}
+
+// Anything else the log records leaves the remembered answers alone.
+func TestOtherEventsKeepTheCache(t *testing.T) {
+	s, _, alice, _ := storeWith(t)
+	calls := 0
+	c := NewWith(s, func(string) bool { calls++; return true })
+	now := time.Unix(1000, 0)
+	c.now = func() time.Time { return now }
+	c.Admin(alice)
+	s.Audit(auth.EvLoginFailed, "", alice.Email, "203.0.113.1", "")
+	now = now.Add(2 * epochEvery)
+	c.Admin(alice)
+	if calls != 1 {
+		t.Errorf("an unrelated event emptied the cache (calls %d)", calls)
+	}
+}

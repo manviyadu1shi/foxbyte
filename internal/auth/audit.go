@@ -109,7 +109,23 @@ CREATE TABLE IF NOT EXISTS security_events (
 CREATE TRIGGER IF NOT EXISTS security_events_no_update BEFORE UPDATE ON security_events
   BEGIN SELECT RAISE(ABORT, 'security_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS security_events_no_delete BEFORE DELETE ON security_events
-  BEGIN SELECT RAISE(ABORT, 'security_events is append-only'); END;`
+  BEGIN SELECT RAISE(ABORT, 'security_events is append-only'); END;
+CREATE INDEX IF NOT EXISTS security_events_kind_id ON security_events(kind, id);`
+
+// AdminEpoch identifies the newest change to who is an admin that the security
+// log holds: the id of the last admin.granted or admin.revoked event, or 0.
+//
+// Every process that remembers who is an admin (internal/access) compares it,
+// so a grant or a revoke made anywhere — at the CLI, in the console, by another
+// process — reaches all of them at once, instead of when their memory of the
+// old answer expires. Indexed on (kind, id), so it stays one lookup however long
+// the log grows.
+func (s *Store) AdminEpoch() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT coalesce(max(id), 0) FROM security_events WHERE kind IN (?, ?)`,
+		EvAdminGranted, EvAdminRevoked).Scan(&n)
+	return n, err
+}
 
 // SecurityEvent is one entry of the security log.
 type SecurityEvent struct {

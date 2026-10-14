@@ -44,3 +44,32 @@ func TestSecurityLogChains(t *testing.T) {
 		t.Errorf("recent: %+v", recent)
 	}
 }
+
+// AdminEpoch moves with every recorded grant or revoke, and with nothing else.
+func TestAdminEpoch(t *testing.T) {
+	s := testStore(t)
+	epoch := func() int64 {
+		t.Helper()
+		n, err := s.AdminEpoch()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := epoch(); n != 0 {
+		t.Fatalf("a log with no admin changes has epoch %d, want 0", n)
+	}
+	s.Audit(EvAdminGranted, "root@x.com", "ann@x.com", "", "branch main")
+	g := epoch()
+	if g == 0 {
+		t.Fatal("a grant did not move the epoch")
+	}
+	s.Audit(EvLoginOK, "", "ann@x.com", "203.0.113.1", "")
+	if n := epoch(); n != g {
+		t.Errorf("a login moved the epoch from %d to %d", g, n)
+	}
+	s.Audit(EvAdminRevoked, "root@x.com", "ann@x.com", "", "branch main")
+	if n := epoch(); n <= g {
+		t.Errorf("a revoke did not move the epoch past %d (got %d)", g, n)
+	}
+}
