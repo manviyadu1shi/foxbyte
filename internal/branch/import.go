@@ -364,12 +364,19 @@ func prepareTarget(target string) error {
 	// ones ledger.sql establishes (see its "Least-privilege client role"
 	// section, whose comment already says they are meant to cover imported
 	// tables), re-applied because this statement undoes them.
-	return run("docker", "exec", "-e", pgImportOptions, container(target),
+	//
+	// The schema also held the Blackbox's dblink, which went with it: it is put
+	// back (ensureDblink), or a refused change on this branch was neither
+	// reported as one nor recorded.
+	if err := run("docker", "exec", "-e", pgImportOptions, container(target),
 		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-c",
 		"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
 		"-c", "GRANT USAGE, CREATE ON SCHEMA public TO db_client;",
 		"-c", "ALTER DEFAULT PRIVILEGES FOR ROLE "+pgUser+" IN SCHEMA public GRANT ALL ON TABLES TO db_client;",
-		"-c", "ALTER DEFAULT PRIVILEGES FOR ROLE "+pgUser+" IN SCHEMA public GRANT ALL ON SEQUENCES TO db_client;")
+		"-c", "ALTER DEFAULT PRIVILEGES FOR ROLE "+pgUser+" IN SCHEMA public GRANT ALL ON SEQUENCES TO db_client;"); err != nil {
+		return err
+	}
+	return ensureDblink(target)
 }
 
 func loadPostgres(p *Progress, target, dsn string, a As) error {
@@ -756,7 +763,10 @@ func mongoImportCollection(p *Progress, target, uri, coll string, a As) error {
 // temporarily disables (setGuard). A crash mid-import would otherwise leave a
 // branch permanently unguarded, so re-enable it whenever the branch (re)starts.
 // Idempotent — enabling an already-enabled trigger is a no-op.
-func reconcileGuard(name string) { setGuard(name, true) }
+func reconcileGuard(name string) {
+	setGuard(name, true)
+	healDblink(name) // and the guardrail's means of recording what it refused
+}
 
 // setGuard enables/disables the ledger's destructive-DDL guardrail on an instance.
 func setGuard(target string, enabled bool) {

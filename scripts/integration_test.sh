@@ -990,6 +990,10 @@ assert_eq "ETL passing pipeline exits 0" "$?" "0"
 assert_eq "ETL landed raw source in the raw schema" "$(pg pg-etltest "SELECT to_regclass('raw.buildings') IS NOT NULL")" "t"
 assert_eq "ETL model flattened jsonb into a column" "$(pg pg-etltest "SELECT city FROM public.stg_buildings WHERE name='Empire State'")" "New York"
 assert_eq "ETL aggregate model computed" "$(pg pg-etltest "SELECT n FROM public.city_counts WHERE city='Chicago'")" "2"
+# Staging renames public to raw, which used to carry the Blackbox's dblink out
+# of its triggers' reach: a refused change was then misreported and unrecorded.
+assert_eq "…and the pipeline's branch keeps the guardrail's dblink where its triggers look" \
+  "$(pg pg-etltest "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE extname='dblink'")" "public"
 
 $S branch delete etlfail >/dev/null 2>&1
 cat > /tmp/etl_fail.json << 'JSON'
@@ -1346,6 +1350,30 @@ assert_eq "an extension only a superuser may make is refused for ivy, and the er
 assert_contains "…an admin's import makes it, as before" "$(up "$KEY" "$IVYSQL" admext)" "event: done"
 for b in ivyimp ivyimp2 ivyext admimp admext; do $S branch delete "$b" >/dev/null 2>&1; done
 $S user delete ivy@foxbyte.dev >/dev/null 2>&1
+
+echo "### 11i. an imported branch keeps the guardrail's record of what it refused"
+# An import resets the new branch's public schema, and the Blackbox's dblink
+# used to go with it. A refused change still did not run, but the client was
+# told "function dblink_exec(text, text) does not exist" and the Blackbox kept
+# no record of the attempt.
+blocked() { pg "$1" "SELECT count(*) FROM bb.schema_ledger WHERE status='BLOCKED'"; }
+client() { sudo docker exec "$1" psql -U db_client -d appdb -c "$2" 2>&1; }
+$S branch delete dblimp >/dev/null 2>&1
+printf 'CREATE TABLE dbl_t (a int);\nINSERT INTO dbl_t VALUES (1);\n' > /tmp/dblimp.sql
+$S import --from /tmp/dblimp.sql --as dblimp >/dev/null 2>&1
+assert_eq "an imported branch has the guardrail's dblink" \
+  "$(pg pg-dblimp "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE extname='dblink'")" "public"
+B0="$(blocked pg-dblimp)"
+assert_contains "a client's DROP TABLE there is refused by the guardrail, by name" \
+  "$(client pg-dblimp 'DROP TABLE dbl_t')" "guardrail: DROP TABLE is blocked by policy"
+assert_eq "…and the Blackbox records the attempt" "$(blocked pg-dblimp)" "$((B0 + 1))"
+# A branch imported before the fix lost it; the next start puts it back.
+sudo docker exec -e PGOPTIONS="-c bb.allow_destructive=on" pg-dblimp psql -q -U dbadmin -d appdb -c "DROP EXTENSION dblink" >/dev/null 2>&1
+assert_eq "(a branch without it, as an older import left one)" "$(pg pg-dblimp "SELECT count(*) FROM pg_extension WHERE extname='dblink'")" "0"
+$S branch suspend dblimp >/dev/null 2>&1; $S branch resume dblimp >/dev/null 2>&1
+assert_eq "the next start puts it back" "$(pg pg-dblimp "SELECT count(*) FROM pg_extension WHERE extname='dblink'")" "1"
+assert_contains "…and a refused change is reported as one again" "$(client pg-dblimp 'DROP TABLE dbl_t')" "guardrail: DROP TABLE is blocked by policy"
+$S branch delete dblimp >/dev/null 2>&1
 
 echo "### 12. fox uninstall (B1)"
 # Removal used to be a list of commands to run by hand. This runs last: it takes

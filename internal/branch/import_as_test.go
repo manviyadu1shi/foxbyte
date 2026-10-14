@@ -129,3 +129,13 @@ func TestPinsReachTheSourceTools(t *testing.T) {
 		t.Fatal("the operator has pins")
 	}
 }
+
+// dblink goes where the Blackbox's triggers look for it (their search_path is
+// pg_catalog, public, bb), and is left alone where it already is.
+func TestEnsureDblinkPutsItWhereTheTriggersLook(t *testing.T) {
+	for _, must := range []string{"CREATE EXTENSION dblink SCHEMA public", "NOT IN ('public', 'bb')", "ALTER EXTENSION dblink SET SCHEMA public"} {
+		if !strings.Contains(ensureDblinkSQL, must) {
+			t.Errorf("ensureDblinkSQL lacks %q", must)
+		}
+	}
+}

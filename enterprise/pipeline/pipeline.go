@@ -70,6 +70,11 @@ func run(p *branch.Progress, spec branch.PipelineSpec, branchName string, as bra
 	if err := branch.ExecSQL(branchName, `DROP SCHEMA IF EXISTS raw CASCADE; ALTER SCHEMA public RENAME TO raw; CREATE SCHEMA public;`); err != nil {
 		return res, fmt.Errorf("stage raw: %w", err)
 	}
+	// The rename carried the Blackbox's dblink into raw, out of its triggers'
+	// reach: put it back, or a refused change on this branch goes unrecorded.
+	if err := branch.EnsureDblink(branchName); err != nil {
+		return res, fmt.Errorf("stage raw: %w", err)
+	}
 	// The new public is the superuser's and bare. An account's models are made
 	// as that account, which acts as db_client, so db_client needs to use it.
 	if as.Account != "" {
