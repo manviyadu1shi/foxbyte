@@ -3,6 +3,7 @@
 package controlplane
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/thefoxbyte/foxbyte/internal/auth"
@@ -22,7 +23,7 @@ func TestImportAs(t *testing.T) {
 		{"nobody is refused, not run as the superuser", auth.User{}, false, branch.As{}, false},
 	} {
 		got, ok := importAsFor(c.u, c.admin)
-		if got != c.want || ok != c.ok {
+		if !reflect.DeepEqual(got, c.want) || ok != c.ok {
 			t.Errorf("%s: got %+v %v, want %+v %v", c.name, got, ok, c.want, c.ok)
 		}
 	}

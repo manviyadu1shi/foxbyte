@@ -327,6 +327,9 @@
     <tr data-id="E4" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">E4</td><td><b>Browser security headers</b><ul class="subs">
       <li class="ok">No response can be framed; none is type-sniffed</li><li class="ok">The console runs scripts from its own server only</li>
       <li class="ok">HSTS on TLS to a real name, never to localhost</li><li class="ok">No console page breaks the policy (UI suite)</li></ul></td><td class="tb">Unit; VM §1c; UI</td></tr>
+    <tr data-id="E5" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">E5</td><td><b>Cross-site requests refused</b><ul class="subs">
+      <li class="ok">A change from another site's page is refused on both APIs and at sign-in</li><li class="ok">Origin: null and Sec-Fetch-Site: cross-site refused</li>
+      <li class="ok">The console's own origin and non-browser clients unaffected</li></ul></td><td class="tb">Unit; VM §1c</td></tr>
   </table>
 </section>
 
@@ -476,7 +479,7 @@
     <tr data-id="I10" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I10</td><td><b>Live progress (CLI &amp; SSE)</b><ul class="subs">
       <li class="ok">Live log and progress bar</li><li class="lim">psql subprocess output not streamed</li></ul></td><td class="tb">Manual</td></tr>
     <tr data-id="I11" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I11</td><td><b>Import REST endpoints</b><ul class="subs">
-      <li class="ok">From a connection string or an uploaded file</li><li class="ok">Target names validated (the import creates the branch through branch.Create)</li><li class="ok">Private, local and container sources for admins only; metadata refused</li></ul></td><td class="tb">Manual; unit; VM §1d</td></tr>
+      <li class="ok">From a connection string or an uploaded file</li><li class="ok">Target names validated (the import creates the branch through branch.Create)</li><li class="ok">Private, local and container sources for admins only; metadata refused</li><li class="ok">Held to the checked address: no DNS rebinding past the guard (unit)</li></ul></td><td class="tb">Manual; unit; VM §1d</td></tr>
     <tr data-id="I12" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I12</td><td><b>Web Import page</b><ul class="subs">
       <li class="ok">Database and file panels with live console</li><li class="ok">No longer claims a SQLite loader that doesn't exist</li></ul></td><td class="tb">Manual</td></tr>
     <tr data-id="I13" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">I13</td><td><b>Exact identifier fidelity</b><ul class="subs">

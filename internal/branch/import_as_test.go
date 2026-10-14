@@ -107,3 +107,25 @@ func TestARefusedBackslashCommandCountsAsAFailure(t *testing.T) {
 		t.Fatalf("count = %d, want 1", c.count)
 	}
 }
+
+// The pins reach every throwaway container that dials the source; an operator's
+// tools run exactly as before.
+func TestPinsReachTheSourceTools(t *testing.T) {
+	a := As{Account: "ann@example.com", Pins: []string{"my.example.com:203.0.113.8"}}
+	if got := strings.Join(a.addHosts(), " "); got != "--add-host my.example.com:203.0.113.8" {
+		t.Fatalf("addHosts = %q", got)
+	}
+	c := parseMyDSN("mysql://u:p@my.example.com:3306/app")
+	plain := strings.Join(myArgs(c, "mysql"), " ")
+	c.addHosts = a.addHosts()
+	pinned := strings.Join(myArgs(c, "mysql"), " ")
+	if strings.Contains(plain, "--add-host") {
+		t.Fatalf("an operator's mysql run gained a pin: %s", plain)
+	}
+	if !strings.Contains(pinned, "--network "+network+" --add-host my.example.com:203.0.113.8 "+mysqlImage) {
+		t.Fatalf("the pin is not on the container: %s", pinned)
+	}
+	if (As{}).addHosts() != nil {
+		t.Fatal("the operator has pins")
+	}
+}
