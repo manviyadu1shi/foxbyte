@@ -50,7 +50,26 @@ __pycache__/
 id_ed*
 id_rsa*
 id_ecdsa*
+id_dsa*
 *.pem
+# …nor any other form a private key or a credential store takes. CI's gitleaks
+# scan catches one only after it is pushed, and on a public repository a pushed
+# branch is already published; this is the layer that stops it at `git add`.
+*.key
+*.p12
+*.pfx
+*.ppk
+*.jks
+*.keystore
+.pgpass
+.env
+.env.*
+!.env.example
+# FoxByte's own credentials, should ~/.fox ever be copied into a checkout
+secrets.json
+pg.env
+s3.env
+auth.db
 
 # The release signing key (cmd/releasesign) belongs in the Actions secret and a password manager
 release-signing.key
