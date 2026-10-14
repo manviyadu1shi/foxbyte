@@ -586,7 +586,7 @@
       <li class="ok">build, vet, test, integration suites</li><li class="ok">Suites run only in a throwaway test VM (guarded)</li><li class="ok">release, web, WSL builds, feature-doc (both PDFs)</li><li class="ok"><code>integration-sdks</code>, <code>integration-ui</code></li></ul></td><td class="tb">CI</td></tr>
     <tr data-id="M2" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">M2</td><td><b>Linux CI</b><ul class="subs">
       <li class="ok">Build, vet, test, gofmt</li><li class="ok">Release script tests, checklist sync check</li>
-      <li class="ok">VM integration suites nightly in CI (one runner per suite)</li><li class="ok">Release tags gated on them (release.yml nightly-gate)</li><li class="ok">Secret scanning, govulncheck, npm audit, UI type-check</li></ul></td><td class="tb">CI</td></tr>
+      <li class="ok">VM integration suites nightly in CI (one runner per suite)</li><li class="ok">Release tags gated on them (release.yml nightly-gate)</li><li class="ok">Secret scanning, govulncheck, npm audit, UI type-check</li><li class="ok">No suite passes having tested nothing, or fails on another suite's leftovers</li></ul></td><td class="tb">CI</td></tr>
     <tr data-id="M3" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">M3</td><td><b>Windows CI</b><ul class="subs">
       <li class="ok">Build, vet, test, Pester, installer encoding</li>
       <li class="ok">Guard tests read backslash paths, and generated files are pinned to LF (21 Sep)</li>

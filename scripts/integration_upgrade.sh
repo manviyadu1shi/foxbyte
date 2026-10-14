@@ -42,8 +42,8 @@ HOW_MANY="${FOX_UPGRADE_COUNT:-5}"
 PASS=0
 FAIL=0
 SKIP=0
+VERSIONS=0   # released versions actually exercised, as opposed to setup steps passed
 HTTP_PID=""
-WORKTREES=()
 
 ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
@@ -51,9 +51,11 @@ skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 
 cleanup() {
 	[ -n "$HTTP_PID" ] && { kill "$HTTP_PID" 2>/dev/null; wait "$HTTP_PID" 2>/dev/null; }
-	for w in ${WORKTREES+"${WORKTREES[@]}"}; do
-		git -C "$ROOT" worktree remove --force "$w" >/dev/null 2>&1
-	done
+	# An old version's `update --yes` restarts the servers, and they run from
+	# the binary it was given, under $T. Left alone they outlived the suite and
+	# answered on :8080 as fox-v2.1.2 for whatever ran next. Anchored, so the
+	# pattern cannot match this shell's own command line.
+	pkill -f "^$T/" 2>/dev/null
 	rm -rf "$T"
 }
 trap cleanup EXIT
@@ -143,11 +145,15 @@ echo "3. each released version updates to it"
 while IFS= read -r tag; do
 	[ -n "$tag" ] || continue
 	src="$T/src/$tag"
-	if ! git -C "$ROOT" worktree add --detach -q "$src" "$tag" 2>"$T/wt-$tag.log"; then
-		skip "$tag — could not check out its source ($(tail -n1 "$T/wt-$tag.log"))"
+	# git archive reads the tag and writes nothing into the repository. A
+	# worktree had to register itself under .git, which the test VM mounts
+	# read-only, so there every version was skipped. A tag that cannot be read
+	# is a broken harness, not a version to pass over.
+	mkdir -p "$src"
+	if ! git -C "$ROOT" archive "$tag" 2>"$T/wt-$tag.log" | tar -x -C "$src" 2>>"$T/wt-$tag.log"; then
+		bad "$tag — could not read its source ($(tail -n1 "$T/wt-$tag.log"))"
 		continue
 	fi
-	WORKTREES+=("$src")
 	old="$T/fox-$tag"
 	if ! (cd "$src" && go build \
 		-ldflags "-X $MODULE/internal/version.Version=${tag#v} -X $MODULE/internal/update.releasePublicKey=$RELEASE_PUB" \
@@ -174,6 +180,7 @@ while IFS= read -r tag; do
 	fi
 
 	out="$(HOME="$fhome" "$old" update --yes 2>&1)"
+	VERSIONS=$((VERSIONS + 1))
 	if grep -qF "engine $CANDIDATE runs" <<<"$out"; then
 		ok "$tag → $CANDIDATE: the staged engine is accepted"
 	elif grep -qF "doesn't run" <<<"$out"; then
@@ -186,8 +193,10 @@ while IFS= read -r tag; do
 done <<<"$TAGS"
 
 echo
-echo "### $PASS passed, $FAIL failed, $SKIP skipped"
-if [ "$PASS" = 0 ]; then
+echo "### $PASS passed, $FAIL failed, $SKIP skipped ($VERSIONS released version(s) exercised)"
+# Counted by version, not by PASS: the setup steps above pass on their own, so
+# "no version reached" used to read as 2 passed and exit 0.
+if [ "$VERSIONS" = 0 ]; then
 	echo "no version was actually exercised — treating that as a failure, because a"
 	echo "suite that skips everything looks like evidence and is not."
 	exit 1

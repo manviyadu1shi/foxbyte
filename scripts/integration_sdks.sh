@@ -23,6 +23,11 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
 
 echo "### setup: a running stack, an account and a key"
+# Restarted with this binary, not merely started. Every build mints its own
+# licence key (scripts/build_test_fox.sh), so servers another suite left running
+# cannot verify this build's licence: the realtime checks below then failed with
+# "Enterprise is needed" whenever this suite ran straight after integration-ui.
+"$S" stop >/dev/null 2>&1
 "$S" start >/dev/null 2>&1
 for _ in $(seq 60); do curl -sk "$API/api/status" >/dev/null 2>&1 && break; sleep 1; done
 printf 'password123\n' | "$S" user create "$EMAIL" >/dev/null 2>&1
