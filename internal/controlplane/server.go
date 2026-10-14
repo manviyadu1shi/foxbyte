@@ -114,7 +114,10 @@ func Serve(addr string) error {
 	// carry it wrongly.
 	branch.StartStateSync(store)
 
-	handler := httpx.CORS(store.WebOrigin())(logging(httpx.LimitBodies(httpx.MaxBody, isUpload)(mux)))
+	// Security headers on every response; the console's page adds its own
+	// Content-Security-Policy (serveUI), so the guide's PDF and the API's JSON
+	// are not held to a policy written for an app.
+	handler := httpx.SecurityHeaders("")(httpx.CORS(store.WebOrigin())(logging(httpx.LimitBodies(httpx.MaxBody, isUpload)(mux))))
 
 	// TLS when a certificate is available (self-signed on first run, or a real
 	// one via FOX_TLS_CERT/KEY), so API keys and session tokens are never
@@ -1167,6 +1170,7 @@ func serveUI(mux *http.ServeMux, ui fs.FS) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", httpx.ConsolePolicy)
 		_, _ = w.Write(b)
 	})
 }

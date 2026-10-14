@@ -153,7 +153,8 @@ func Serve(addr string) error {
 	mux.Handle("/agents", protected)
 	mux.Handle("/agents/", protected)
 
-	handler := httpx.CORS(store.WebOrigin())(logging(httpx.LimitBodies(httpx.MaxBody, nil)(mux)))
+	// The Agent API answers machines only, so nothing it returns may load or be framed.
+	handler := httpx.SecurityHeaders(httpx.APIPolicy)(httpx.CORS(store.WebOrigin())(logging(httpx.LimitBodies(httpx.MaxBody, nil)(mux))))
 	srv := httpx.Server(addr, handler)
 	cert, key, tlsErr := tlsutil.EnsureCert()
 	if tlsErr != nil {
