@@ -117,7 +117,11 @@ func Serve(addr string) error {
 	// Security headers on every response; the console's page adds its own
 	// Content-Security-Policy (serveUI), so the guide's PDF and the API's JSON
 	// are not held to a policy written for an app.
-	handler := httpx.SecurityHeaders("")(httpx.CORS(store.WebOrigin())(logging(httpx.LimitBodies(httpx.MaxBody, isUpload)(mux))))
+	// …and a change a browser sends from another site is refused (cross-site
+	// request forgery; matters most when FOX_WEB_ORIGIN makes the cookie
+	// SameSite=None).
+	handler := httpx.SecurityHeaders("")(httpx.CORS(store.WebOrigin())(httpx.RefuseCrossSite(store.WebOrigin())(
+		logging(httpx.LimitBodies(httpx.MaxBody, isUpload)(mux)))))
 
 	// TLS when a certificate is available (self-signed on first run, or a real
 	// one via FOX_TLS_CERT/KEY), so API keys and session tokens are never
@@ -375,8 +379,11 @@ func registerAPI(mux *http.ServeMux) {
 			send("error", map[string]string{"message": "web import needs a connection string (postgres://, mysql://, mariadb://, mongodb://); use the file panel for .sql/.csv/.json"})
 			return
 		}
-		if err := checkImportSource(body.Source, isAdmin(r)); err != nil {
-			send("error", map[string]string{"message": err.Error()})
+		// Checked, and for anyone but an admin held to the addresses it was
+		// checked at (pinImportSource).
+		src, pins, perr := pinImportSource(body.Source, isAdmin(r))
+		if perr != nil {
+			send("error", map[string]string{"message": perr.Error()})
 			return
 		}
 		as, aok := importAs(r)
@@ -384,12 +391,13 @@ func registerAPI(mux *http.ServeMux) {
 			send("error", map[string]string{"message": errNoImportAccount.Error()})
 			return
 		}
+		as.Pins = pins
 		status, target, err := "imported", "", error(nil)
 		if body.Continuous {
 			status = "replicating"
-			target, err = branch.ImportContinuousToAs(p, body.Source, strings.TrimSpace(body.Target), as)
+			target, err = branch.ImportContinuousToAs(p, src, strings.TrimSpace(body.Target), as)
 		} else {
-			target, err = branch.ImportToAs(p, body.Source, strings.TrimSpace(body.Target), as)
+			target, err = branch.ImportToAs(p, src, strings.TrimSpace(body.Target), as)
 		}
 		// The new branch is the importer's, even when the load failed part way:
 		// what was loaded is theirs to inspect or delete.
@@ -1027,10 +1035,14 @@ func registerPipelines(mux *http.ServeMux, store *auth.Store) {
 				"a branch named %q already exists and was not made by this pipeline — rename the pipeline, or delete that branch first", target)})
 			return
 		}
-		if err := checkImportSource(spec.Source, isAdmin(r)); err != nil {
-			send("error", map[string]string{"message": err.Error()})
+		// This run's copy of the spec only: what is stored keeps the address
+		// as its owner wrote it, and the next run checks it afresh.
+		src, pins, perr := pinImportSource(spec.Source, isAdmin(r))
+		if perr != nil {
+			send("error", map[string]string{"message": perr.Error()})
 			return
 		}
+		spec.Source = src
 		if err := store.ClaimPipelineTarget(pl.ID, target); err != nil {
 			send("error", map[string]string{"message": fmt.Sprintf("branch %q: %v", target, err)})
 			return
@@ -1056,6 +1068,7 @@ func registerPipelines(mux *http.ServeMux, store *auth.Store) {
 			send("error", map[string]string{"message": errNoImportAccount.Error()})
 			return
 		}
+		as.Pins = pins
 		runID, _ := store.StartRun(pl.ID, u.ID)
 		res, err := branch.RunPipelineAs(p, spec, target, as)
 		if oerr := own(r, target); oerr != nil && err == nil {

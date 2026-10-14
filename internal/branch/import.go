@@ -88,7 +88,7 @@ func ImportToAs(p *Progress, source, target string, a As) (string, error) {
 			func(t string) error { return loadMySQL(p, t, source, a) })
 	case hasScheme(source, "mongodb", "mongodb+srv"):
 		return importInstance(p, target, defaultTargetName(source), "MongoDB source (collections → JSONB)", a,
-			func(t string) error { return loadMongo(p, t, source) })
+			func(t string) error { return loadMongo(p, t, source, a) })
 	}
 	info, err := os.Stat(source)
 	if err != nil || info.IsDir() {
@@ -389,7 +389,7 @@ func loadMySQL(p *Progress, target, dsn string, a As) error {
 	// information_schema layout), so route those to a mysqldump-based path whose
 	// client speaks the modern protocol. MariaDB and MySQL ≤5.7 stay on pgloader,
 	// which maps their indexes/constraints more richly.
-	if mysqlNeedsNative(dsn) {
+	if mysqlNeedsNative(dsn, a) {
 		return loadMySQLNative(p, target, dsn, a)
 	}
 	if err := ensurePgloaderImage(p); err != nil {
@@ -410,8 +410,8 @@ func loadMySQL(p *Progress, target, dsn string, a As) error {
 	// loads nothing (e.g. it can't read a MySQL 8.0 source's metadata), so the exit
 	// code can't be trusted. Show the operator its log, then treat "no tables
 	// landed" as the real success signal.
-	out, err := exec.Command("sudo", "docker", "run", "--rm", "--network", network,
-		pgloaderImage, "pgloader", dsn, pgTarget).CombinedOutput()
+	args := append([]string{"docker", "run", "--rm", "--network", network}, a.addHosts()...)
+	out, err := exec.Command("sudo", append(args, pgloaderImage, "pgloader", dsn, pgTarget)...).CombinedOutput()
 	p.Logf("%s", string(out))
 	if err != nil {
 		return fmt.Errorf("pgloader: %w", err)
@@ -443,7 +443,10 @@ func ensurePgloaderImage(p *Progress) error {
 
 // --- MySQL 8.x native path (mysqldump; the client speaks caching_sha2_password) ---
 
-type myDSN struct{ host, port, user, pass, db string }
+type myDSN struct {
+	host, port, user, pass, db string
+	addHosts                   []string // As.addHosts, for every tool run against this source
+}
 
 func parseMyDSN(dsn string) myDSN {
 	u, err := url.Parse(dsn)
@@ -463,8 +466,8 @@ func parseMyDSN(dsn string) myDSN {
 
 // myArgs builds a `docker run … mysql:8 <tool> -h… -u…` argument list.
 func myArgs(c myDSN, tool string, extra ...string) []string {
-	a := []string{"docker", "run", "--rm", "--network", network, mysqlImage, tool,
-		"-h", c.host, "-P", c.port, "-u", c.user}
+	a := append([]string{"docker", "run", "--rm", "--network", network}, c.addHosts...)
+	a = append(a, mysqlImage, tool, "-h", c.host, "-P", c.port, "-u", c.user)
 	if c.pass != "" {
 		a = append(a, "-p"+c.pass)
 	}
@@ -474,8 +477,9 @@ func myArgs(c myDSN, tool string, extra ...string) []string {
 // mysqlNeedsNative reports whether a source needs the mysqldump path: true only
 // for MySQL ≥8. MariaDB and MySQL ≤5.7 (and an unreachable probe) return false so
 // pgloader handles them. stdout carries only the version; warnings go to stderr.
-func mysqlNeedsNative(dsn string) bool {
+func mysqlNeedsNative(dsn string, as As) bool {
 	c := parseMyDSN(dsn)
+	c.addHosts = as.addHosts()
 	if c.host == "" {
 		return false
 	}
@@ -502,6 +506,7 @@ func mysqlNeedsNative(dsn string) bool {
 // translating MySQL's dialect/escaping for Postgres.
 func loadMySQLNative(p *Progress, target, dsn string, a As) error {
 	c := parseMyDSN(dsn)
+	c.addHosts = a.addHosts()
 	if c.db == "" {
 		return fmt.Errorf("the MySQL connection string must include a database name (…/dbname)")
 	}
@@ -660,8 +665,8 @@ func mapMySQLType(dataType, columnType string) string {
 // ANSI-quoted identifiers and MySQL-style value escaping. Non-INSERT lines
 // (LOCK/UNLOCK/SET/comments) are dropped; each INSERT is a single physical line.
 func mysqldumpData(c myDSN) (string, error) {
-	args := []string{"docker", "run", "--rm", "--network", network, mysqlImage, "mysqldump",
-		"-h", c.host, "-P", c.port, "-u", c.user}
+	args := append([]string{"docker", "run", "--rm", "--network", network}, c.addHosts...)
+	args = append(args, mysqlImage, "mysqldump", "-h", c.host, "-P", c.port, "-u", c.user)
 	if c.pass != "" {
 		args = append(args, "-p"+c.pass)
 	}
@@ -683,8 +688,8 @@ func mysqldumpData(c myDSN) (string, error) {
 
 // loadMongo migrates every collection in a MongoDB source into its own JSONB
 // table, using the mongo image's shell to enumerate and export documents.
-func loadMongo(p *Progress, target, uri string) error {
-	cols, err := mongoCollections(uri)
+func loadMongo(p *Progress, target, uri string, a As) error {
+	cols, err := mongoCollections(uri, a)
 	if err != nil {
 		return err
 	}
@@ -695,16 +700,17 @@ func loadMongo(p *Progress, target, uri string) error {
 	for i, c := range cols {
 		p.Logf("  collection %q → table %q (name preserved)…\n", c, c)
 		p.step(i+1, len(cols), "collection "+c)
-		if err := mongoImportCollection(p, target, uri, c); err != nil {
+		if err := mongoImportCollection(p, target, uri, c, a); err != nil {
 			return fmt.Errorf("collection %q: %w", c, err)
 		}
 	}
 	return nil
 }
 
-func mongoCollections(uri string) ([]string, error) {
-	out, err := exec.Command("sudo", "docker", "run", "--rm", "--network", network, mongoImage,
-		"mongosh", uri, "--quiet", "--eval", "db.getCollectionNames().forEach(c=>print(c))").Output()
+func mongoCollections(uri string, a As) ([]string, error) {
+	args := append([]string{"docker", "run", "--rm", "--network", network}, a.addHosts()...)
+	out, err := exec.Command("sudo", append(args, mongoImage,
+		"mongosh", uri, "--quiet", "--eval", "db.getCollectionNames().forEach(c=>print(c))")...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("could not reach the MongoDB source: %w", err)
 	}
@@ -725,12 +731,12 @@ const mongoCleanJS = `function clean(v){if(v==null)return v;if(v instanceof Date
 	`if(typeof v!=='object')return v;if(v._bsontype)return v.toString();` +
 	`if(Array.isArray(v))return v.map(clean);var o={};for(var k in v)o[k]=clean(v[k]);return o;}`
 
-func mongoImportCollection(p *Progress, target, uri, coll string) error {
+func mongoImportCollection(p *Progress, target, uri, coll string, a As) error {
 	// Stream each document as one plain-JSON line into the JSON loader.
 	script := fmt.Sprintf("%s db.getCollection(%s).find().forEach(function(d){print(JSON.stringify(clean(d)))})",
 		mongoCleanJS, jsStr(coll))
-	cmd := exec.Command("sudo", "docker", "run", "--rm", "--network", network, mongoImage,
-		"mongosh", uri, "--quiet", "--eval", script)
+	args := append([]string{"docker", "run", "--rm", "--network", network}, a.addHosts()...)
+	cmd := exec.Command("sudo", append(args, mongoImage, "mongosh", uri, "--quiet", "--eval", script)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

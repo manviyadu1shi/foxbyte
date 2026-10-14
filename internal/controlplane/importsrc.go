@@ -21,9 +21,10 @@ import (
 //     (a container name) are for admins;
 //   - anything else — a database with a public address — anyone may import.
 //
-// The check resolves the name when the import starts; a name that resolves
-// differently a moment later is not caught. It narrows who can reach inside,
-// it does not make an import a firewall.
+// The check resolves the name when the import starts. For an admin that is the
+// end of it. For anyone else the import is then held to the addresses that were
+// checked (pinImportSource), so a name that resolves somewhere else a moment
+// later — DNS rebinding — still reaches the address that passed.
 
 // importHosts lists the hosts a connection string would connect to.
 func importHosts(src string) ([]string, error) {
@@ -115,13 +116,21 @@ var lookupIP = net.LookupIP
 
 // checkImportSource applies the rule above to a connection string.
 func checkImportSource(src string, admin bool) error {
+	_, err := vetImportSource(src, admin)
+	return err
+}
+
+// vetImportSource is checkImportSource, also returning the address each name
+// was found at: the one an import is to be held to.
+func vetImportSource(src string, admin bool) (map[string]string, error) {
 	hosts, err := importHosts(src)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	found := map[string]string{}
 	for _, h := range hosts {
 		if metadataNames[strings.ToLower(strings.TrimSuffix(h, "."))] {
-			return fmt.Errorf("imports cannot connect to %s: it is a cloud metadata endpoint, not a database", h)
+			return nil, fmt.Errorf("imports cannot connect to %s: it is a cloud metadata endpoint, not a database", h)
 		}
 		var ips []net.IP
 		if ip := net.ParseIP(h); ip != nil {
@@ -131,16 +140,30 @@ func checkImportSource(src string, admin bool) error {
 			if admin {
 				continue
 			}
-			return fmt.Errorf("cannot resolve %s; only an admin may import from a host that is not publicly resolvable", h)
+			return nil, fmt.Errorf("cannot resolve %s; only an admin may import from a host that is not publicly resolvable", h)
+		} else {
+			found[h] = preferIPv4(ips).String()
 		}
 		for _, ip := range ips {
 			if neverIP(ip) {
-				return fmt.Errorf("imports cannot connect to %s (%s): link-local and metadata addresses are refused", h, ip)
+				return nil, fmt.Errorf("imports cannot connect to %s (%s): link-local and metadata addresses are refused", h, ip)
 			}
 			if internalIP(ip) && !admin {
-				return fmt.Errorf("%s is on this machine or a private network (%s); only an admin may import from there", h, ip)
+				return nil, fmt.Errorf("%s is on this machine or a private network (%s); only an admin may import from there", h, ip)
 			}
 		}
 	}
-	return nil
+	return found, nil
+}
+
+// preferIPv4 picks the address to hold a name to. Every one of them passed;
+// an IPv4 one is chosen where there is one, since a container's network often
+// has no IPv6 route.
+func preferIPv4(ips []net.IP) net.IP {
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip
+		}
+	}
+	return ips[0]
 }

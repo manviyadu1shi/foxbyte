@@ -30,9 +30,28 @@ import (
 // What FoxByte writes itself (the schema reset before a load, CSV and JSON
 // loaders, the pipeline's staging step) is unchanged and still runs as the
 // superuser: none of it executes text the source supplied.
-type As struct{ Account string }
+type As struct {
+	Account string
+	// Pins holds an ordinary account's source to the addresses its names were
+	// checked at, as "name:ip" (controlplane's import guard sets it). The tools
+	// that reach a MySQL or MongoDB source run in throwaway containers, and each
+	// gets these as --add-host entries: the name still goes out for TLS, but it
+	// cannot resolve somewhere else between the check and the connection (DNS
+	// rebinding). A Postgres source is held the same way by libpq's hostaddr,
+	// which the guard writes into the connection string itself.
+	Pins []string
+}
 
 func (a As) confined() bool { return a.Account != "" }
+
+// addHosts is the docker run arguments that hold a source to Pins.
+func (a As) addHosts() []string {
+	var out []string
+	for _, p := range a.Pins {
+		out = append(out, "--add-host", p)
+	}
+	return out
+}
 
 // psqlRole is who a load's psql session logs in as.
 func (a As) psqlRole() string {

@@ -166,6 +166,16 @@ assert_eq "the Agent API forbids loading or framing anything it returns" \
   "$(hdr https://localhost:8088/agents content-security-policy)" "default-src 'none'; frame-ancestors 'none'"
 assert_eq "no HSTS to localhost" "$(hdr https://localhost:8080/api/status strict-transport-security)" ""
 # The console's own page and its policy are checked by integration_ui.sh, whose build has the console in it.
+# A change a browser sends from another site is refused (14 Oct 2026 audit, S4);
+# the same request from this console, or from no browser at all, is not.
+xs() { curl -sk -o /dev/null -w '%{http_code}' -H "$AUTH" -H 'Content-Type: application/json' -X POST "$@"; }
+assert_eq "a change sent from another site's page is refused, on both APIs and at sign-in" \
+  "$(xs -H 'Origin: https://evil.example' -d '{"name":"xsite"}' https://localhost:8080/api/branches)|$(xs -H 'Origin: https://evil.example' https://localhost:8088/agents/xsite/branch)|$(xs -H 'Origin: https://evil.example' -d '{"email":"test@foxbyte.dev","password":"password123"}' https://localhost:8080/auth/login)" "403|403|403"
+assert_eq "…as is one from a sandboxed page, and one the browser marks cross-site" \
+  "$(xs -H 'Origin: null' -d '{"name":"xsite"}' https://localhost:8080/api/branches)|$(xs -H 'Sec-Fetch-Site: cross-site' -d '{"name":"xsite"}' https://localhost:8080/api/branches)" "403|403"
+assert_eq "…and nothing was made" "$($S branch list 2>/dev/null | grep -c xsite)" "0"
+assert_eq "the console's own origin, and a client that is no browser, sign in as before" \
+  "$(xs -H 'Origin: https://localhost:8080' -d '{"email":"test@foxbyte.dev","password":"password123"}' https://localhost:8080/auth/login)|$(xs -d '{"email":"test@foxbyte.dev","password":"password123"}' https://localhost:8080/auth/login)" "200|200"
 
 echo "### 1d. accounts own their branches (audit v2: G02, G10, G12, G16)"
 # test@ is the first account (an admin). alice and bob are ordinary accounts.
