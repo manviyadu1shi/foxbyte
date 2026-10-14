@@ -376,12 +376,17 @@ func registerAPI(mux *http.ServeMux) {
 			send("error", map[string]string{"message": err.Error()})
 			return
 		}
+		as, aok := importAs(r)
+		if !aok {
+			send("error", map[string]string{"message": errNoImportAccount.Error()})
+			return
+		}
 		status, target, err := "imported", "", error(nil)
 		if body.Continuous {
 			status = "replicating"
-			target, err = branch.ImportContinuousTo(p, body.Source, strings.TrimSpace(body.Target))
+			target, err = branch.ImportContinuousToAs(p, body.Source, strings.TrimSpace(body.Target), as)
 		} else {
-			target, err = branch.ImportTo(p, body.Source, strings.TrimSpace(body.Target))
+			target, err = branch.ImportToAs(p, body.Source, strings.TrimSpace(body.Target), as)
 		}
 		// The new branch is the importer's, even when the load failed part way:
 		// what was loaded is theirs to inspect or delete.
@@ -475,7 +480,12 @@ func registerAPI(mux *http.ServeMux) {
 			send("error", map[string]string{"message": err.Error()})
 			return
 		}
-		target, err := branch.ImportReaderTo(p, file, kind, hdr.Filename, strings.TrimSpace(r.FormValue("target")))
+		as, aok := importAs(r)
+		if !aok {
+			send("error", map[string]string{"message": errNoImportAccount.Error()})
+			return
+		}
+		target, err := branch.ImportReaderToAs(p, file, kind, hdr.Filename, strings.TrimSpace(r.FormValue("target")), as)
 		if oerr := own(r, target); oerr != nil && err == nil {
 			err = oerr
 		}
@@ -1038,8 +1048,13 @@ func registerPipelines(mux *http.ServeMux, store *auth.Store) {
 				send("progress", map[string]any{"done": done, "total": total, "label": label})
 			},
 		}
+		as, aok := importAs(r)
+		if !aok {
+			send("error", map[string]string{"message": errNoImportAccount.Error()})
+			return
+		}
 		runID, _ := store.StartRun(pl.ID, u.ID)
-		res, err := branch.RunPipeline(p, spec, target)
+		res, err := branch.RunPipelineAs(p, spec, target, as)
 		if oerr := own(r, target); oerr != nil && err == nil {
 			err = oerr
 		}

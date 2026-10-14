@@ -123,7 +123,7 @@ func TestTheDispatchersCallTheRegisteredEngine(t *testing.T) {
 		},
 		func(int64, string, string, []RequestEntry) (int, error) { called["apply"] = true; return 0, nil },
 	)
-	SetPipelineRunner(func(*Progress, PipelineSpec, string) (RunResult, error) {
+	SetPipelineRunner(func(*Progress, PipelineSpec, string, As) (RunResult, error) {
 		called["pipeline"] = true
 		return RunResult{}, nil
 	})
