@@ -1070,3 +1070,70 @@ body.row-resizing { cursor: row-resize; user-select: none; }
 .lic-side { display: flex; align-items: center; gap: 8px; }
 .lic-side code { font-family: var(--font-mono); font-size: 12px; padding: 2px 8px; border-radius: 7px;
   border: 1px solid var(--border); background: var(--card); color: var(--muted); white-space: nowrap; }
+
+/* ---- the edition, at the top of every page, and the way up from it ------- */
+/* The badge says what the engine is honouring, not which binary it is: an
+   Enterprise build with no licence reads Standard, because that is what it
+   serves. Four tones, because the two between "standard" and "enterprise" are
+   the ones somebody needs told about. */
+.topbar-end { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.edition-badge {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 11px;
+  border-radius: var(--radius-pill); border: 1px solid var(--border-strong);
+  font-size: 12px; font-weight: 700; letter-spacing: .02em; text-decoration: none;
+  color: var(--muted); background: var(--panel-2); white-space: nowrap;
+}
+.edition-badge:hover { color: var(--text); }
+.edition-badge.enterprise {
+  color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+  background: color-mix(in srgb, var(--green) 11%, transparent);
+}
+.edition-badge.warn {
+  color: var(--amber); border-color: color-mix(in srgb, var(--amber) 50%, var(--border));
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.edition-badge.stop {
+  color: var(--red); border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.edition-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+button.primary.sm.upgrade-btn { padding: 6px 14px; font-size: 13px; }
+
+/* ---- the Upgrade modal --------------------------------------------------- */
+.modal.upgrade-modal { max-width: 520px; }
+.upgrade-modal .seg { margin: 16px 0 12px; }
+.upgrade-modal .err { font-family: var(--font-body); }
+/* The file picker is the whole box, so a click anywhere on it opens the
+   chooser, and a file dropped on it is read the same way. */
+.drop {
+  position: relative; display: flex; align-items: center; justify-content: center; text-align: center;
+  min-height: 112px; padding: 16px; border: 1.5px dashed var(--border-strong); border-radius: var(--radius);
+  color: var(--text); font-size: 14px; cursor: pointer; background: var(--panel-2);
+  transition: border-color .15s, background .15s;
+}
+.drop:hover, .drop.dragging { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--panel-2)); }
+.drop.has-file { border-style: solid; }
+.drop input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.drop:focus-within { box-shadow: var(--ring); }
+.lic-paste {
+  width: 100%; resize: vertical; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5;
+}
+/* The result: a mark at the top, centred, then what it means and what is left. */
+.upgrade-result { text-align: center; padding-top: 6px; }
+.upgrade-result h3 { margin-top: 14px; }
+.upgrade-notes { text-align: left; color: var(--muted); font-size: 13px; line-height: 1.5; margin: 14px 0 0; padding-left: 18px; }
+.modal-actions.centered { justify-content: center; }
+.status-mark { display: block; margin: 0 auto; }
+.status-mark circle { fill: color-mix(in srgb, currentColor 13%, transparent); stroke: currentColor; stroke-width: 2.5; }
+.status-mark path { fill: none; stroke: currentColor; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+.status-mark.activated { color: var(--green); }
+.status-mark.warning { color: var(--amber); }
+.status-mark.locked { color: var(--red); }
+.upgrade-modal pre.cmd {
+  margin: 6px 0 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--panel-2);
+  border: 1px solid var(--border); font-size: 12px; white-space: pre-wrap; word-break: break-all;
+}
+@media (max-width: 560px) {
+  .topbar-end { gap: 6px; }
+  .edition-badge { padding: 2px 8px; font-size: 11px; }
+}

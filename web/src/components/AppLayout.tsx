@@ -5,6 +5,9 @@ import { useAuth } from '../auth-context'
 import { getTheme, toggleTheme } from '../theme'
 import { Mark, Wordmark } from './brand'
 import LicenseBanner from './LicenseBanner'
+import EditionBadge, { offerUpgrade } from './EditionBadge'
+import UpgradeModal from './UpgradeModal'
+import { refreshEntitlement, useLicense } from '../features'
 import { BRAND } from '../brand'
 import * as I from './icons'
 
@@ -92,6 +95,15 @@ export default function AppLayout() {
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [theme, setTheme] = useState(getTheme())
+  const lic = useLicense()
+  const [upgrading, setUpgrading] = useState(false)
+  // After the modal closes, every lock, badge and banner on the page asks the
+  // engine again — so what was just unlocked is unlocked in front of the person
+  // who unlocked it, not after a reload they would not think to do.
+  const closeUpgrade = (changed: boolean) => {
+    setUpgrading(false)
+    if (changed) refreshEntitlement()
+  }
 
   useEffect(() => { setDrawerOpen(false) }, [pathname])
   useEffect(() => {
@@ -183,7 +195,14 @@ export default function AppLayout() {
               <span>{page.label}</span>
             </div>
           )}
+          <div className="topbar-end">
+            <EditionBadge lic={lic} />
+            {offerUpgrade(lic) && (
+              <button className="primary sm upgrade-btn" onClick={() => setUpgrading(true)}>Upgrade</button>
+            )}
+          </div>
         </header>
+        {upgrading && lic && <UpgradeModal lic={lic} onClose={closeUpgrade} />}
         {/* The console is a workbench, not an article: it fills the window and
             scrolls in panes of its own. Every other page keeps the centred,
             measure-limited column, which is right for reading and wrong for a

@@ -9,3 +9,7 @@ package host
 func pushGuestState(string, []byte) error { return nil }
 
 func removeGuestState(string) error { return nil }
+
+// pullGuestState has no second copy to read: the caller's own file is the
+// engine's.
+func pullGuestState(string) ([]byte, error) { return nil, ErrNoState }

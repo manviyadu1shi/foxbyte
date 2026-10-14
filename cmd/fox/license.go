@@ -91,19 +91,26 @@ func licenseActivate(args []string) error {
 	if err := license.Save(l, l.Fingerprint, 0); err != nil {
 		return err
 	}
+	// A licence activated here supersedes any removal still waiting to reach
+	// the engine; finishing that removal now would take this one away.
+	_ = license.ClearRemoved()
 	fmt.Printf("Activated %s for %s.\n", l.ID, l.Customer)
 	giveEngineTheLicence()
-	noteRestartIfRunning()
+	noteEnginePicksItUp()
 	st := license.EvaluateBound(l, pub, l.Fingerprint, fp, time.Now())
 	printLicenseState(st, fp)
 	return nil
 }
 
 func licenseShow() error {
+	// Asked before answering, so a licence activated in the console is the one
+	// shown here — the console said "activated", and this saying "none" would
+	// leave somebody believing one of them is broken.
+	syncLicenceWithEngine(false)
 	fp := host.MachineID()
 	l, boundTo, rebinds, err := license.Load()
 	if err == license.ErrNone {
-		fmt.Printf("No licence is installed, so this is the %s edition.\n\n", edition.Name())
+		fmt.Printf("%s\n\n", noLicenceLine())
 		printFingerprint(fp)
 		return nil
 	}
@@ -158,25 +165,40 @@ func licenseRebind() error {
 	}
 	giveEngineTheLicence()
 	fmt.Printf("Moved %s to this machine (%s).\n", l.ID, short(fp))
-	noteRestartIfRunning()
+	noteEnginePicksItUp()
 	fmt.Printf("That is move %d. It is recorded here and in the security log; the\n"+
 		"number of machines on an account is counted where the licence was issued.\n", rebinds+1)
 	return nil
 }
 
 func licenseRemove() error {
-	if _, _, _, err := license.Load(); err == license.ErrNone {
+	l, _, _, err := license.Load()
+	if err == license.ErrNone {
 		fmt.Println("No licence was installed.")
 		return nil
+	}
+	// Recorded before anything is removed, so a removal the engine cannot hear
+	// now — the VM stopped — is finished by the next `fox start` instead of
+	// being undone by it. Reconciling copies would otherwise read "the engine
+	// has a licence this machine lacks" as the engine being ahead.
+	if err == nil {
+		if merr := license.MarkRemoved(l.ID); merr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record the removal: %v\n", merr)
+		}
 	}
 	if err := license.Remove(); err != nil {
 		return err
 	}
 	// The engine's copy goes too, or the entitlement would outlive the licence
 	// on exactly the platforms where it is hardest to notice.
-	reportEngineCopy(host.RemoveState(license.FileName), "take the licence away from")
-	fmt.Printf("Removed. This install is the %s edition again; no data was touched.\n", edition.Name())
-	noteRestartIfRunning()
+	rerr := host.RemoveState(license.FileName)
+	reportEngineCopy(rerr, "take the licence away from")
+	if rerr == nil {
+		// Delivered, so there is nothing left to finish.
+		_ = license.ClearRemoved()
+	}
+	fmt.Printf("Removed. %s No data was touched.\n", noLicenceLine())
+	noteEnginePicksItUp()
 	return nil
 }
 
@@ -212,17 +234,16 @@ func reportEngineCopy(err error, what string) {
 	}
 }
 
-// noteRestartIfRunning says the obvious thing that would otherwise be found out
-// the hard way: an engine already running is serving the entitlement it read
-// when it started, and a licence changed underneath it takes effect on the next
-// restart. That is also when the change reaches the security log, which records
-// what the engine honoured rather than what was typed here.
-func noteRestartIfRunning() {
+// noteEnginePicksItUp says when a change reaches an engine that is already
+// running: within seconds, by itself. Every long-running engine process now
+// watches the licence file (license.Watch), so the restart this used to ask for
+// is no longer needed — and asking for one that is not needed teaches people
+// to restart a database for no reason.
+func noteEnginePicksItUp() {
 	if !host.EngineRunning() {
 		return
 	}
-	fmt.Printf("\nThe engine is already running with the entitlement it read at start-up.\n"+
-		"`%s stop && %s start` applies this; nothing is interrupted until you do.\n", brand.CLI, brand.CLI)
+	fmt.Println("\nThe running engine picks this up within a few seconds; nothing needs restarting.")
 }
 
 // printLicenseState says what is true and what to do about it, in that order.
@@ -270,4 +291,69 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// syncLicenceWithEngine reconciles this machine's licence with the engine's
+// copy, and says what it did.
+//
+// On Linux the two are one file and this does nothing. On macOS and Windows the
+// console can activate a licence the host never hears about, and a removal made
+// while the VM was down never reached the engine; license.Reconcile decides
+// which copy is right and this carries it out.
+//
+// startEngine is for `fox start`: the stack is about to come up anyway, so the
+// VM may be started to do this, and the engine then reads the reconciled
+// licence the moment it starts. Everywhere else a stopped VM is left stopped.
+//
+// Best-effort and quiet unless something changed. A licence is never a reason a
+// command fails, and a database is never a reason to wait on one.
+func syncLicenceWithEngine(startEngine bool) {
+	pull := host.PullState
+	if startEngine {
+		pull = host.PullStateStartingEngine
+	}
+	engineRaw, err := pull(license.FileName)
+	switch {
+	case errors.Is(err, host.ErrNoEngine):
+		return // nothing to reconcile with yet
+	case errors.Is(err, host.ErrNoState):
+		engineRaw = nil
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "warning: could not read the engine's licence: %v\n", err)
+		return
+	}
+	hostRaw, _ := os.ReadFile(license.Path())
+	hostCopy, engineCopy := license.ReadCopy(hostRaw), license.ReadCopy(engineRaw)
+	switch license.Reconcile(hostCopy, engineCopy, license.RemovedID()) {
+	case license.SyncPush:
+		_ = host.PushState(license.FileName, hostRaw)
+	case license.SyncPull:
+		if err := license.WriteRaw(engineRaw); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not keep the engine's licence here: %v\n", err)
+			return
+		}
+		_ = license.ClearRemoved()
+		fmt.Printf("Kept a copy of licence %s here — it was activated in the console, so this machine\n"+
+			"had not heard of it, and rebuilding the VM would have lost it.\n", engineCopy.ID())
+	case license.SyncRemove:
+		if err := host.RemoveState(license.FileName); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not finish removing the licence from the engine: %v\n", err)
+			return
+		}
+		_ = license.ClearRemoved()
+		fmt.Printf("Finished removing licence %s from the engine — it was removed here while the\n"+
+			"engine was stopped.\n", engineCopy.ID())
+	}
+}
+
+// noLicenceLine says what having no licence means, in the terms the console's
+// badge uses. It used to name the build — "so this is the enterprise edition"
+// — which on an Enterprise build with no licence is true of the binary and
+// wrong about everything a person can do with it: the paid features are locked,
+// and the console now says Standard for exactly that reason.
+func noLicenceLine() string {
+	if edition.Enterprise {
+		return "No licence is installed, so the paid features are locked."
+	}
+	return "No licence is installed, and this standard edition needs none."
 }

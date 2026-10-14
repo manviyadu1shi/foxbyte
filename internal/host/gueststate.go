@@ -60,6 +60,41 @@ func PushStateStartingEngine(name string, data []byte) error {
 	return pushGuestState(name, data)
 }
 
+// ErrNoState means the engine has no such file. Ordinary — most installs have
+// no licence — so callers treat it as "nothing there", not as a failure.
+var ErrNoState = errors.New("the engine has no such file")
+
+// PullState reads <name> from the engine's state directory: the other direction
+// of PushState.
+//
+// It exists because the console learned to activate a licence. That writes the
+// engine's copy, inside the VM, and nothing on this side of the boundary hears
+// about it — so this machine went on believing there was no licence, a rebuilt
+// VM lost it, and the next `fox start` pushed this machine's older copy over the
+// newer one the engine had been given. Reading the engine's copy back is what
+// lets the two be reconciled instead.
+//
+// On Linux the host is the engine and there is one file, so this reports
+// ErrNoState: there is no second copy to reconcile with.
+func PullState(name string) ([]byte, error) {
+	if err := checkStateName(name); err != nil {
+		return nil, err
+	}
+	return pullGuestState(name)
+}
+
+// PullStateStartingEngine is PullState for the moment the stack comes up, and
+// may start the VM for the same reason PushStateStartingEngine may.
+func PullStateStartingEngine(name string) ([]byte, error) {
+	if err := checkStateName(name); err != nil {
+		return nil, err
+	}
+	if err := newEngineHost().prepare(); err != nil {
+		return nil, ErrNoEngine
+	}
+	return pullGuestState(name)
+}
+
 // RemoveState deletes <name> from the engine's state directory. A missing file
 // is not an error — removing a licence the engine never received should say
 // "removed", not fail.
@@ -132,6 +167,18 @@ func guestStateWriteScript(name string) string {
 		`cat > "$d/` + name + `.new"; chmod 0600 "$d/` + name + `.new"; ` +
 		`mv -f "$d/` + name + `.new" "$d/` + name + `"`
 }
+
+// guestStateReadScript prints <name> from the engine's state directory, and
+// exits 3 when there is no such file, so "absent" cannot be mistaken for an
+// empty licence or for a shell that failed.
+func guestStateReadScript(name string) string {
+	return guestStateDirScript() +
+		`if [ -f "$d/` + name + `" ]; then cat "$d/` + name + `"; else exit ` + noStateExit + `; fi`
+}
+
+// noStateExit is the exit status that means "no such file", chosen so it is
+// not one a missing shell or a failed cat would produce.
+const noStateExit = "3"
 
 func guestStateRemoveScript(name string) string {
 	return "set -e; " + guestStateDirScript() + `rm -f "$d/` + name + `"`

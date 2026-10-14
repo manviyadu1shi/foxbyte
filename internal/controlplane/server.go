@@ -67,6 +67,10 @@ func Serve(addr string) error {
 	// nothing when nothing has changed, so a steady install records one event
 	// ever, not one per restart.
 	license.Record(store, license.Installed())
+	// And whatever it honours from here on: a licence activated from the
+	// console, pushed from the host, removed, or lapsing with time is picked
+	// up without a restart and recorded when it starts being honoured.
+	license.Watch(func(st license.Status) { license.Record(store, st) })
 
 	mux := http.NewServeMux()
 	store.MountPublic(mux) // /auth/* (register, login, logout, me, providers, oauth)

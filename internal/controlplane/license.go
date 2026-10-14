@@ -44,6 +44,10 @@ func registerLicense(mux *http.ServeMux) {
 			"features": featureNames(),
 			"reason":   st.Reason,
 			"action":   st.Action,
+			// Whether the viewer may activate one, so the console offers the
+			// button only to someone it will work for. Everybody else is told
+			// who can, instead of being handed a form that ends in a 403.
+			"you_are_admin": isAdmin(r),
 		}
 		// A Standard build has no licence to describe and needs none: saying so
 		// plainly is what lets the console show paid features locked with an
@@ -51,7 +55,15 @@ func registerLicense(mux *http.ServeMux) {
 		if !st.Present() {
 			if edition.Enterprise {
 				out["reason"] = "no licence is installed"
-				out["action"] = "run `" + brand.CLI + " license activate <file>`"
+				// The console has a button for this now, and the banner that
+				// shows this sentence sits under it. Only an admin can use it,
+				// so everyone else is told who can, rather than handed a
+				// command or a button that ends in a refusal.
+				if isAdmin(r) {
+					out["action"] = "choose Upgrade at the top of the page, or run `" + brand.CLI + " license activate <file>`"
+				} else {
+					out["action"] = "ask an admin to activate one — they can choose Upgrade at the top of the page"
+				}
 			}
 			writeJSON(w, 200, out)
 			return
@@ -147,7 +159,7 @@ func registerLicense(mux *http.ServeMux) {
 			"unlocks":   st.Unlocks(),
 			"reason":    st.Reason,
 			"action":    st.Action,
-			"notes":     activationNotes(st),
+			"notes":     activationNotes(),
 		}
 		writeJSON(w, 200, out)
 	})
@@ -155,33 +167,25 @@ func registerLicense(mux *http.ServeMux) {
 
 // activationNotes says what is still left to do, and only when it is.
 //
-// Two things this endpoint cannot finish on its own, each true in a different
-// deployment:
+// There used to be two. The Gateway and the Agent API read the entitlement once,
+// at start-up, so an activation here was honoured by this process and refused
+// by those until a restart; every long-running process now watches the licence
+// file (license.Watch) and that note is gone.
 //
-//   - The Gateway and the Agent API are separate processes that read the
-//     entitlement when they start. The control plane now honours the licence;
-//     they will not until they are restarted.
-//   - On macOS and Windows the engine runs inside a VM and this process is in
-//     it, while `fox license` deliberately runs on the host — the fingerprint
-//     has to be read there, because recreating the VM is an ordinary repair
-//     and a licence that moved with it would be rebound by a routine fix.
-//     There is no channel from here back to the host, so the host's copy is
-//     not written: rebuilding the VM would lose this, and `fox license show`
-//     on the host will say there is none.
-//
-// Said rather than hidden. A licence that works until the next repair, with
-// nothing having mentioned it, is the kind of surprise that arrives months
-// later with no way to connect it to this moment.
-func activationNotes(st license.Status) []string {
+// One remains, on macOS and Windows. The engine runs in a VM and this process
+// is in it, while `fox license` deliberately runs on the host — the fingerprint
+// has to be read there, because recreating the VM is an ordinary repair and a
+// licence that moved with it would be rebound by a routine fix. There is no
+// channel from here back to the host, so only the VM's copy is written now; the
+// host keeps a copy of its own the next time it talks to the engine
+// (syncLicenceWithEngine, on `fox start` and `fox license show`). Said, because
+// until then a VM rebuilt by hand would lose it.
+func activationNotes() []string {
 	var notes []string
-	if st.Unlocks() {
-		notes = append(notes,
-			"The control plane is honouring this now. Restart the engine so the Gateway and the Agent API do too.")
-	}
 	if host.InGuest() {
 		notes = append(notes,
-			"This engine runs inside a VM, and only the VM's copy was written. Run `"+brand.CLI+
-				" license activate <file>` on your computer as well, or rebuilding the VM will lose it.")
+			"Your computer keeps its own copy the next time you run `"+brand.CLI+" start` or `"+brand.CLI+
+				" license show` there. Until then, rebuilding the engine's VM by hand would lose this licence.")
 	}
 	return notes
 }

@@ -19,7 +19,18 @@ import (
 // without the signature, and the signature is checked against a key only we
 // hold — but it names a customer, and that is theirs rather than ours to
 // publish.
-func Path() string { return brand.StatePath(FileName) }
+func Path() string {
+	if pathOverride != "" {
+		return pathOverride
+	}
+	return brand.StatePath(FileName)
+}
+
+// pathOverride points the licence at a temporary file, for this package's
+// tests only. The state directory is resolved once per process, so without it
+// a test of the watcher would have to read and write the real ~/.fox — and a
+// test that can replace somebody's licence is not one to run on a laptop.
+var pathOverride string
 
 // FileName is the licence's name inside the state directory. It is named
 // because the engine is given a copy of this file by name on macOS and

@@ -21,9 +21,10 @@
 //
 // And it never blocks the page. An engine too old to have /api/license, or one
 // that cannot answer, leaves the console exactly as it was.
-import { useEffect, useState } from 'react'
-import { getLicense, type License } from '../api'
+import { useState } from 'react'
+import { type License } from '../api'
 import { BRAND } from '../brand'
+import { useLicense } from '../features'
 
 // Dismissals last for the browser session, not forever: a new day's work should
 // see a licence that is still expiring. Storage can be unavailable (private
@@ -59,14 +60,11 @@ function headline(l: License) {
 }
 
 export default function LicenseBanner() {
-  const [lic, setLic] = useState<License | null>(null)
+  // Shared with the badge and every lock, so a licence activated from the
+  // Upgrade modal takes this banner down the moment the modal closes rather
+  // than at the next reload. An older engine, or none, is simply null.
+  const lic = useLicense()
   const [dismissed, setDismissed] = useState(readDismissed)
-
-  useEffect(() => {
-    let live = true
-    getLicense().then(l => { if (live) setLic(l) }).catch(() => { /* older engine, or none */ })
-    return () => { live = false }
-  }, [])
 
   if (!lic) return null
   const t = tone(lic)

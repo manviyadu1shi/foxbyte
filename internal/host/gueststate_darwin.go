@@ -19,6 +19,17 @@ func removeGuestState(name string) error {
 	return guestStateShell(guestStateRemoveScript(name), nil)
 }
 
+func pullGuestState(name string) ([]byte, error) {
+	if _, err := exec.LookPath("limactl"); err != nil {
+		return nil, ErrNoEngine
+	}
+	vm := instance()
+	if !instanceExists(vm) || !instanceRunning(vm) {
+		return nil, ErrNoEngine
+	}
+	return guestStateOutput(exec.Command("limactl", "shell", vm, "--", "sh", "-c", guestStateReadScript(name)))
+}
+
 // guestStateShell runs a snippet in the VM as the user the engine runs as —
 // `limactl shell` without `-u`, deliberately. The engine's state lives in that
 // user's home (the anchor keys and the API pid file are there, and /root/.fox
