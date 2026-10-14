@@ -33,8 +33,15 @@ const (
 )
 
 // adminTTL is how long an admin check is remembered. Asking Postgres costs a
-// round trip into a container; a revoked grant takes at most this long to bite.
+// round trip into a container. A grant or revoke recorded in the security log
+// clears what is remembered within epochEvery (see Admin); this is the bound for
+// one that is not, such as a GRANT typed into psql.
 const adminTTL = 30 * time.Second
+
+// epochEvery is how often a Checker asks the security log whether who is an
+// admin has changed. Cheap (one indexed lookup in auth.db), but asked on every
+// request otherwise, and a second is well inside what anyone notices.
+const epochEvery = time.Second
 
 // Checker applies the rule. The zero value is not usable; use New.
 type Checker struct {
@@ -44,6 +51,11 @@ type Checker struct {
 	mu     sync.Mutex
 	admins map[string]adminEntry
 	now    func() time.Time
+
+	// The last AdminEpoch seen, and when it was asked. A change empties admins.
+	epoch      int64
+	epochAt    time.Time
+	adminEpoch func() (int64, error)
 }
 
 type adminEntry struct {
@@ -62,6 +74,12 @@ func New(store *auth.Store) *Checker {
 		},
 		admins: map[string]adminEntry{},
 		now:    time.Now,
+		adminEpoch: func() (int64, error) {
+			if store == nil {
+				return 0, nil
+			}
+			return store.AdminEpoch()
+		},
 	}
 }
 
@@ -79,6 +97,7 @@ func (c *Checker) Admin(u auth.User) bool {
 		return false
 	}
 	c.mu.Lock()
+	c.forgetIfChanged()
 	e, ok := c.admins[u.Email]
 	c.mu.Unlock()
 	if ok && c.now().Sub(e.at) < adminTTL {
@@ -89,6 +108,25 @@ func (c *Checker) Admin(u auth.User) bool {
 	c.admins[u.Email] = adminEntry{admin: admin, at: c.now()}
 	c.mu.Unlock()
 	return admin
+}
+
+// forgetIfChanged empties the remembered answers when the security log has
+// recorded a grant or revoke since they were given. Asked at most every
+// epochEvery; a log that cannot be read leaves things to the TTL. c.mu is held.
+func (c *Checker) forgetIfChanged() {
+	now := c.now()
+	if !c.epochAt.IsZero() && now.Sub(c.epochAt) < epochEvery {
+		return
+	}
+	c.epochAt = now
+	n, err := c.adminEpoch()
+	if err != nil {
+		return
+	}
+	if n != c.epoch {
+		c.epoch = n
+		c.admins = map[string]adminEntry{}
+	}
 }
 
 // Level is what u may do to the branch called name ("" is main).

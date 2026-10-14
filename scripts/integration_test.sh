@@ -234,6 +234,17 @@ assert_eq "bob changes his password" \
   "$(curl -sk -b "$BCOOKIE" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"current":"password123","new":"password456"}' https://localhost:8080/api/account/password)" "200"
 assert_eq "…the old one no longer signs in" \
   "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"email":"bob@foxbyte.dev","password":"password123"}' https://localhost:8080/auth/login)" "401"
+# A grant or revoke made at the CLI, in another process, reaches the running
+# servers within a second: each one watches the security log for admin changes
+# (access: AdminEpoch) instead of trusting what it remembered for 30 seconds.
+assert_eq "bob is no admin, and the console has just said so (and remembered it)" \
+  "$(code "$KB" https://localhost:8080/api/users)" "403"
+$S admin grant bob@foxbyte.dev >/dev/null 2>&1; sleep 2
+assert_eq "a CLI grant reaches the console and the Gateway within seconds, not 30" \
+  "$(code "$KB" https://localhost:8080/api/users)|$(PGPASSWORD="$KB" psql "$GATEWAY/alice-dev?sslmode=require" -tAc 'select x from secret' 2>/dev/null)" "200|42"
+$S admin revoke bob@foxbyte.dev >/dev/null 2>&1; sleep 2
+assert_eq "…and so does a CLI revoke" \
+  "$(code "$KB" https://localhost:8080/api/users)|$(PGPASSWORD="$KB" psql "$GATEWAY/alice-dev?sslmode=require" -tAc 'select x from secret' 2>&1 | grep -c 'no branch')" "403|1"
 BOB_ID="$(as "$KEY" https://localhost:8080/api/users | python3 -c 'import sys,json;print([u["id"] for u in json.load(sys.stdin)["users"] if u["email"]=="bob@foxbyte.dev"][0])')"
 assert_eq "the admin deletes bob, and his key stops working" \
   "$(code "$KEY" -X DELETE "https://localhost:8080/api/users/$BOB_ID")|$(code "$KB" https://localhost:8080/api/status)" "200|401"
