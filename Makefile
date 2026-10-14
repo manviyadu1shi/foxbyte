@@ -149,8 +149,8 @@ integration-editions: ## Check the edition boundary against the built binaries
 # Non-destructive and needs no stack, so it runs on the host rather than in the
 # test VM — but only on Linux, where the engine is the host binary. It builds
 # each recent tag from its own source, so it needs the tags present.
-integration-upgrade: ## Check that previously released versions can update to this build (Linux)
-	bash scripts/integration_upgrade.sh
+integration-upgrade: test-vm ## Check that previously released versions can update to this build, in the test VM
+	$(IN_TEST_VM) bash "$(CURDIR)/scripts/integration_upgrade.sh"
 
 integration-pg-upgrade: test-vm ## Run the export/restore and `fox pg upgrade` checks (16 -> the shipped major) in the test VM
 	$(IN_TEST_VM) bash -c 'cd "$(CURDIR)" && go build -o /tmp/fox ./cmd/fox' && $(IN_TEST_VM) bash "$(CURDIR)/scripts/integration_pg_upgrade.sh"

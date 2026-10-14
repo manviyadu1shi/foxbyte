@@ -133,7 +133,18 @@ echo "### upgrading to Enterprise in the console"
 LICENCE="${S}.licence.json"   # written by scripts/build_test_fox.sh beside the binary
 "$S" admin grant "$EMAIL" >/dev/null 2>&1   # only an admin is offered Upgrade
 "$S" license remove >/dev/null 2>&1
-sleep 4   # the engine notices within a few seconds (license.Watch)
+# Waited for, not slept on. The engine notices a removed licence within a few
+# seconds (license.Watch), but it remembers who is an admin for up to 30
+# (access.adminTTL), and the specs above asked as this account moments ago — so
+# a fixed four-second sleep left the Upgrade button missing about as often as not.
+UKEY="$("$S" apikey create "$EMAIL" upgrade 2>/dev/null | grep -o "${DB_KEY_PREFIX}[A-Za-z0-9_-]*")"
+ready=""
+for _ in $(seq 45); do
+	lic="$(curl -sk -H "Authorization: Bearer $UKEY" "$API/api/license")"
+	if grep -q '"you_are_admin":true' <<<"$lic" && grep -q '"unlocks":false' <<<"$lic"; then ready=1; break; fi
+	sleep 1
+done
+[ -n "$ready" ] || echo "  the engine did not report an admin with no licence within 45s: $lic"
 FOX_E2E_URL="$API" FOX_E2E_EMAIL="$EMAIL" FOX_E2E_PASSWORD="$PASSWORD" FOX_E2E_LICENCE="$LICENCE" \
 	npx playwright test --grep "licence file uploaded"
 urc=$?
