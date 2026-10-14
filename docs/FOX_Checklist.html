@@ -475,7 +475,7 @@
       <li class="ok">Automated test (VM §5b) and driven in the browser</li></ul></td><td class="tb">Unit; VM §5b</td></tr>
     <tr data-id="I9" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I9</td><td><b>Guard handling during import</b><ul class="subs">
       <li class="ok">Guardrail paused, recording stays on</li><li class="ok">Re-armed even after a crash</li>
-      <li class="ok">The target keeps the grants <code>db_client</code> needs: preparing it drops and recreates <code>public</code>, which had left imported data readable by the import's own superuser and by no gateway client at all</li></ul></td><td class="tb">Manual; integration_test.sh &sect;5b</td></tr>
+      <li class="ok">The target keeps the grants <code>db_client</code> needs: preparing it drops and recreates <code>public</code>, which had left imported data readable by the import's own superuser and by no gateway client at all</li><li class="ok">The guardrail's <code>dblink</code> survives the reset (and a pipeline's rename); older imported branches mend on their next start</li></ul></td><td class="tb">Manual; integration_test.sh &sect;5b, &sect;9, &sect;11i</td></tr>
     <tr data-id="I10" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I10</td><td><b>Live progress (CLI &amp; SSE)</b><ul class="subs">
       <li class="ok">Live log and progress bar</li><li class="lim">psql subprocess output not streamed</li></ul></td><td class="tb">Manual</td></tr>
     <tr data-id="I11" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">I11</td><td><b>Import REST endpoints</b><ul class="subs">

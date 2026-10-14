@@ -62,6 +62,10 @@ func QuerySQLAs(target, sql string, a As) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// EnsureDblink puts the Blackbox's dblink back on a branch where its triggers
+// look for it. A pipeline's staging step renames public, and dblink with it.
+func EnsureDblink(target string) error { return ensureDblink(target) }
+
 // QuoteLiteral renders s as a SQL string literal.
 func QuoteLiteral(s string) string { return sqlQuote(s) }
 
