@@ -156,6 +156,16 @@ assert_eq "a pipeline named after a branch it did not make refuses to run" \
 assert_eq "…and that branch keeps its data" "$(pg pg-itowned 'SELECT x FROM mine')" "7"
 curl -sk -o /dev/null -H "$AUTH" -X DELETE "https://localhost:8080/api/pipelines/$PL_ID"
 $S branch delete itowned >/dev/null 2>&1
+# Browser security headers (14 Oct 2026 audit, S3). Every answer refuses to be
+# framed and says not to sniff its type; HSTS is never sent to a loopback name, where it
+# would force https onto every local dev server.
+hdr() { curl -skI -H "$AUTH" "$1" | tr -d '\r' | grep -i "^$2:" | cut -d' ' -f2-; }
+assert_eq "every answer refuses framing and type sniffing" \
+  "$(hdr https://localhost:8080/api/status x-frame-options)|$(hdr https://localhost:8080/api/status x-content-type-options)|$(hdr https://localhost:8080/api/status referrer-policy)" "DENY|nosniff|same-origin"
+assert_eq "the Agent API forbids loading or framing anything it returns" \
+  "$(hdr https://localhost:8088/agents content-security-policy)" "default-src 'none'; frame-ancestors 'none'"
+assert_eq "no HSTS to localhost" "$(hdr https://localhost:8080/api/status strict-transport-security)" ""
+# The console's own page and its policy are checked by integration_ui.sh, whose build has the console in it.
 
 echo "### 1d. accounts own their branches (audit v2: G02, G10, G12, G16)"
 # test@ is the first account (an admin). alice and bob are ordinary accounts.

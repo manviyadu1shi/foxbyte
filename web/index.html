@@ -18,20 +18,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-    <script>
-      // Set theme before paint to avoid a flash.
-      (function () {
-        try {
-          var t = localStorage.getItem('theme')
-          if (t !== 'light' && t !== 'dark') {
-            t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
-          }
-          document.documentElement.setAttribute('data-theme', t)
-        } catch (e) {
-          document.documentElement.setAttribute('data-theme', 'dark')
-        }
-      })()
-    </script>
+    <!-- Sets the theme before the first paint. A file, not an inline script: the
+         console's Content-Security-Policy runs scripts from this server only. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

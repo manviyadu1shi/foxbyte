@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/thefoxbyte/foxbyte/internal/httpx"
 )
 
 func TestNameValidation(t *testing.T) {
@@ -83,4 +85,26 @@ func TestUnmatchedAPIPathsAnswerJSON(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The console's page carries its Content-Security-Policy, on a deep link as well
+// as at "/"; a file beside it (the guide's PDF) is not held to a policy written
+// for the app.
+func TestTheConsolePageCarriesItsPolicy(t *testing.T) {
+	mux := http.NewServeMux()
+	serveUI(mux, fstest.MapFS{
+		"index.html":                  &fstest.MapFile{Data: []byte("<!doctype html><html></html>")},
+		"foxbyte-developer-guide.pdf": &fstest.MapFile{Data: []byte("%PDF-1.7")},
+	})
+	for path, want := range map[string]string{
+		"/":                            httpx.ConsolePolicy,
+		"/dashboard":                   httpx.ConsolePolicy,
+		"/foxbyte-developer-guide.pdf": "",
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if got := w.Header().Get("Content-Security-Policy"); got != want {
+			t.Errorf("%s: Content-Security-Policy %q, want %q", path, got, want)
+		}
+	}
 }
