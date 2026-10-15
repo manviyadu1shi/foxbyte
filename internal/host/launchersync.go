@@ -35,10 +35,16 @@ import (
 const EnvNoEditionSync = "NO_EDITION_SYNC"
 
 // noSync are the commands that must not trigger it: the ones that replace fox
-// themselves, take the engine away, or are fox's own internal steps.
+// themselves, take the engine away, or are fox's own internal steps; and the
+// ones that describe this binary, whose answer must be about the fox that was
+// run, not the one it would become. `fox version` replacing itself first
+// printed a download's progress before a version line, and on a development
+// build a failure, where a script expected one line.
 var noSync = map[string]bool{
 	"update": true, "upgrade": true, "uninstall": true, "setup": true,
 	"_update-guest": true, "_edition-switch": true,
+	"version": true, "-v": true, "--version": true,
+	"help": true, "-h": true, "--help": true,
 }
 
 // needsLauncherSync is the decision, apart from the asking: on a computer with

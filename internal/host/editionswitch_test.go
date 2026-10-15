@@ -101,6 +101,13 @@ func TestNeedsLauncherSync(t *testing.T) {
 		{"darwin", "update", "enterprise", "standard", false},
 		{"darwin", "uninstall", "enterprise", "standard", false},
 		{"darwin", "setup", "enterprise", "standard", false},
+		// What describes this binary describes the one that was run.
+		{"darwin", "version", "enterprise", "standard", false},
+		{"windows", "--version", "standard", "enterprise", false},
+		{"darwin", "-v", "enterprise", "standard", false},
+		{"darwin", "--help", "enterprise", "standard", false},
+		{"darwin", "-h", "enterprise", "standard", false},
+		{"darwin", "help", "enterprise", "standard", false},
 	} {
 		if got := needsLauncherSync(c.goos, c.cmd, c.engine, c.this); got != c.want {
 			t.Errorf("%+v: %v", c, got)
