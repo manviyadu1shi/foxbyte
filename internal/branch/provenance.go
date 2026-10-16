@@ -374,11 +374,18 @@ func ExecuteChange(req ExecuteChangeRequest) (ExecuteChangeResult, error) {
 	if err := EnsureAppRole(name); err != nil {
 		return ExecuteChangeResult{}, err
 	}
-	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s@%s/%s", ClientRole, addr, pgDatabase))
+	// An agent by login where the branch's Blackbox knows db_agent: the
+	// bb.actor_kind set below is then only a label, and the agent's SQL cannot
+	// change what it is recorded as (agentrole.go).
+	role, asAgent := agentLoginRole(name)
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s@%s/%s", role, addr, pgDatabase))
 	if err != nil {
 		return ExecuteChangeResult{}, err
 	}
 	cfg.Password = ClientRolePassword()
+	if asAgent {
+		cfg.Password = AgentClientRolePassword()
+	}
 	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { res.Notices = append(res.Notices, noticeFrom(n)) }
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {

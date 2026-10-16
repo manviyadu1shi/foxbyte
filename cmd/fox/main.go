@@ -195,7 +195,9 @@ Auth (admin):
   audit [--limit N]              The security log: sign-ins, keys, passwords, accounts, admins, refusals
   audit verify [--pubkey <file>] Check the security log's hash chain, its anchors and their signatures
   audit checkpoint               Anchor the security log's new events now (the control plane does it on a schedule)
-  apikey create <email> [name]   Mint an API key (shown once)
+  apikey create <email> [name] [--agent]
+                                 Mint an API key (shown once); --agent mints
+                                 one to give an AI agent, recorded as an agent
   apikey list <email>            List a user's API keys
   apikey revoke <email> <id>     Revoke an API key
   admin grant <email> [--branch <name>]   Let a user override the destructive-DDL guardrail
@@ -1464,6 +1466,17 @@ func userCreate(email string) error {
 }
 
 func apikeyCmd(args []string) {
+	// --agent may come anywhere after the subcommand.
+	agent := false
+	rest := args[:0:0]
+	for _, a := range args {
+		if a == "--agent" {
+			agent = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	args = rest
 	if len(args) < 2 {
 		fmt.Println("usage: fox apikey <create|list|revoke> <email> [name|id]")
 		os.Exit(2)
@@ -1480,10 +1493,19 @@ func apikeyCmd(args []string) {
 		if len(args) > 2 {
 			name = args[2]
 		}
-		secret, info, err := s.CreateAPIKey(u.ID, name)
+		create, label := s.CreateAPIKey, ""
+		if agent {
+			create, label = s.CreateAgentKey, " [agent]"
+		}
+		secret, info, err := create(u.ID, name)
 		must(err)
-		s.Audit(auth.EvKeyCreated, cliActor(), info.Prefix+"… ("+info.Name+") for "+u.Email, "", "fox apikey create")
+		s.Audit(auth.EvKeyCreated, cliActor(), info.Prefix+"… ("+info.Name+")"+label+" for "+u.Email, "", "fox apikey create")
 		fmt.Printf("API key %q created — copy it now, it won't be shown again:\n\n  %s\n", info.Name, secret)
+		if agent {
+			fmt.Printf("\nAn agent key: it opens %s's branches through the Gateway as an agent,\n"+
+				"so its changes are recorded as an agent's and the agent guardrails apply.\n"+
+				"It cannot sign in to the console or the control-plane API.\n", u.Email)
+		}
 	case "list":
 		keys, err := s.ListKeys(u.ID)
 		must(err)
@@ -1492,7 +1514,14 @@ func apikeyCmd(args []string) {
 			return
 		}
 		for _, k := range keys {
-			fmt.Printf("  %s  %-16s  %s…\n", k.ID, k.Name, k.Prefix)
+			kind := "account"
+			switch {
+			case k.Kind != "":
+				kind = k.Kind
+			case k.Scope != "":
+				kind = "scoped"
+			}
+			fmt.Printf("  %s  %-16s  %-8s  %s…\n", k.ID, k.Name, kind, k.Prefix)
 		}
 	case "revoke":
 		if len(args) < 3 {

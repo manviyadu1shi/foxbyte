@@ -80,8 +80,10 @@ func (s *Store) userFromRequest(r *http.Request) (User, bool) {
 	if key != "" {
 		// A scoped key opens one branch through the Gateway and nothing else, so
 		// it must not authenticate an HTTP request: that would hand an agent the
-		// control plane, and with it every branch its owner can reach.
-		if u, scope, ok := s.VerifyKey(key); ok && scope == "" {
+		// control plane, and with it every branch its owner can reach. Nor may an
+		// agent key (agentkey.go): the console's SQL runs as a person, so an agent
+		// using one here would be recorded as its owner again.
+		if u, scope, kind, ok := s.VerifyKeyKind(key); ok && scope == "" && kind == "" {
 			return u, true
 		}
 	}
@@ -264,14 +266,29 @@ func (s *Store) handleListKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Store) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	u, _ := UserFrom(r.Context())
-	var b struct{ Name string }
+	var b struct{ Name, Kind string }
 	decodeBody(w, r, maxAuthBody, &b)
-	secret, info, err := s.CreateAPIKey(u.ID, b.Name)
+	var (
+		secret string
+		info   KeyInfo
+		err    error
+	)
+	switch b.Kind {
+	case "":
+		secret, info, err = s.CreateAPIKey(u.ID, b.Name)
+	case KindAgent:
+		secret, info, err = s.CreateAgentKey(u.ID, b.Name)
+	default:
+		// Realtime keys are minted for a branch, by someone who may manage it
+		// (realtimekey.go), never here.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be empty (an account key) or \"agent\""})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.Audit(EvKeyCreated, u.Email, info.Prefix+"… ("+info.Name+")", clientIP(r), "")
+	s.Audit(EvKeyCreated, u.Email, keyLabel(info), clientIP(r), "")
 	writeJSON(w, http.StatusCreated, map[string]any{"key": secret, "info": info})
 }
 
@@ -301,4 +318,14 @@ func SessionToken(r *http.Request) string {
 		return c.Value
 	}
 	return ""
+}
+
+// keyLabel names a key in the security log: its prefix and name, and its kind
+// when it is not an ordinary account key.
+func keyLabel(k KeyInfo) string {
+	l := k.Prefix + "… (" + k.Name + ")"
+	if k.Kind != "" {
+		l += " [" + k.Kind + "]"
+	}
+	return l
 }

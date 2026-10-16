@@ -403,8 +403,10 @@ func runTool(name string, args json.RawMessage) (string, error) {
 		if strings.TrimSpace(a.SQL) == "" {
 			return "", fmt.Errorf("sql is required")
 		}
-		// Run as the non-superuser client role, so an agent's SQL is subject to the
-		// guardrail and the ledger's append-only protection like any other client.
+		// Run as the non-superuser agent role (db_agent, or db_client on a branch
+		// whose Blackbox predates it), so an agent's SQL is subject to the
+		// guardrails and the ledger's append-only protection like any other
+		// client's, and is an agent's by login.
 		if branch.MCPSuperuser() {
 			return branch.QueryText(a.Branch, a.SQL)
 		}

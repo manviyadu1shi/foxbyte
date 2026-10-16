@@ -10,6 +10,7 @@ import (
 
 	"github.com/thefoxbyte/foxbyte/internal/access"
 	"github.com/thefoxbyte/foxbyte/internal/auth"
+	"github.com/thefoxbyte/foxbyte/internal/branch"
 )
 
 // Authentication for the MCP server.
@@ -70,7 +71,7 @@ func authenticate(key string) (identity, error) {
 		return identity{}, fmt.Errorf("opening the account store: %w", err)
 	}
 	store = s
-	u, scope, ok := store.VerifyKey(key)
+	u, scope, kind, ok := store.VerifyKeyKind(key)
 	if !ok {
 		return identity{}, errors.New("that API key is not valid (it may have been revoked)")
 	}
@@ -78,7 +79,14 @@ func authenticate(key string) (identity, error) {
 		return identity{}, errors.New("that API key has no account")
 	}
 	acl = access.New(store)
-	return identity{Actor: u.Email, Scope: scope, User: u}, nil
+	// MCP's SQL is an agent's whichever key it holds. An agent key also names
+	// it as one, as the Gateway does ("agent:<email>"), so its record reads as
+	// the agent rather than the person who made the key.
+	actor := u.Email
+	if kind == auth.KindAgent {
+		actor = branch.AgentKeyRole(u.Email)
+	}
+	return identity{Actor: actor, Scope: scope, User: u}, nil
 }
 
 // branchArgs lists the branches a tool call names, with what it needs of each.
