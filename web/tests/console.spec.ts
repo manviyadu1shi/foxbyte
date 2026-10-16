@@ -366,3 +366,43 @@ test('a branch\'s changes can be reviewed and applied to another branch', async 
   // it at the start of every run. Deleting it would leave a retry with no target
   // to select — the branch list is exactly what the second attempt could not find.
 })
+
+// Point 1.1: a result can be copied to paste somewhere else, all of it, the
+// rows ticked, or one cell. `fox sql --format` writes the same text: both
+// follow web/src/copyformat.vectors.json.
+test('a result can be copied as CSV, as Markdown for ticked rows, and one cell at a time', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await signIn(page)
+  await page.goto('/console', { waitUntil: 'domcontentloaded' })
+  await page.locator('select').first().selectOption(branch)
+  const t = `e2e_copy_${Date.now().toString().slice(-6)}`
+  await page.locator('textarea.editor').fill(
+    `CREATE TABLE ${t} (id int, name text, f text); INSERT INTO ${t} VALUES (1, 'Ada, Countess', '=1+1'), (2, 'Bob', NULL);`)
+  await page.getByRole('button', { name: /^run/i }).click()
+  await expect(page.locator('.res-tab')).toHaveCount(2, { timeout: 30_000 })
+  await page.locator('textarea.editor').fill(`SELECT id, name, f FROM ${t} ORDER BY id`)
+  await page.getByRole('button', { name: /^run/i }).click()
+  await expect(page.locator('.grid-wrap td:not(.expand-col)').first()).toHaveText('1', { timeout: 30_000 })
+  const clip = () => page.evaluate(() => navigator.clipboard.readText())
+
+  // The whole result as CSV: quoted where needed, a formula made safe, NULL empty.
+  await page.getByRole('button', { name: 'Copy ▾' }).click()
+  await page.getByLabel('Copy format').selectOption('csv')
+  await page.getByRole('button', { name: /copy all 2 rows/i }).click()
+  await expect.poll(clip).toBe('id,name,f\n1,"Ada, Countess",\'=1+1\n2,Bob,\n')
+
+  // Only the ticked row, as Markdown.
+  await page.keyboard.press('Escape')
+  await page.getByLabel('Select row 2').check()
+  await page.getByRole('button', { name: /^cop(y|ied)/i }).first().click()
+  await page.getByLabel('Copy format').selectOption('markdown')
+  await page.getByRole('button', { name: /copy 1 selected row$/i }).click()
+  await expect.poll(clip).toBe('| id | name | f |\n| --- | --- | --- |\n| 2 | Bob | NULL |\n')
+
+  // One cell: pick it, then the copy shortcut.
+  await page.keyboard.press('Escape')
+  await page.locator('.grid-wrap td', { hasText: 'Ada, Countess' }).click()
+  await expect(page.getByText(/cell selected/i)).toBeVisible()
+  await page.keyboard.press('ControlOrMeta+c')
+  await expect.poll(clip).toBe('Ada, Countess')
+})

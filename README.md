@@ -290,6 +290,8 @@ fox check                        # is this install healthy? each failure says wh
 fox status                       # servers, primary readiness, branches
 fox branch create qa             # copy-on-write branch of main; prints its connection string
 fox connect qa                   # that string again, then a psql shell on the branch
+fox sql --branch qa "SELECT 1"   # run SQL and print the result
+fox sql --format csv "SELECT …" > out.csv   # or tsv, markdown, json, insert --table <t>
 ```
 
 Connect any Postgres client through the gateway — the **database name is the
