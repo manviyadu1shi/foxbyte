@@ -97,7 +97,12 @@ inherited by every branch, capture **every** schema change and attribute it:
   attempts are recorded too;
 - **data changes by agents** — every `UPDATE` and `DELETE` an agent runs is
   recorded with its table and statement (people's are not, to keep ordinary
-  writes fast), and every `TRUNCATE` from anyone.
+  writes fast), and every `TRUNCATE` from anyone;
+- **limits on agents' changes** — an agent's `UPDATE` or `DELETE` is refused
+  once it has changed more rows of a table than that table's limit (100 by
+  default, whatever its `WHERE` says), and refused outright with no `WHERE` at
+  all. `fox guardrail limit [--table <t>] <rows>` changes a limit; an admin can
+  let one statement through.
 
 ```bash
 fox blackbox            # every schema change on this branch, most recent first
@@ -680,7 +685,7 @@ features need a licence — without one it behaves exactly like Standard.
 |---|---|---|
 | Branching, gateway, backups, PITR, time travel | yes | yes |
 | Blackbox: the hash-chained record of every schema change | yes | yes |
-| Agent guardrails: TRUNCATE and unqualified DELETE/UPDATE blocked | yes | yes |
+| Agent guardrails: TRUNCATE blocked; agents' DELETE/UPDATE limited by rows changed, and refused without a WHERE | yes | yes |
 | Realtime row-level change feed | — | yes |
 | Writing signed Blackbox anchors (checkpoints, on a schedule) | — | yes |
 | Checking anchors: `fox blackbox integrity`, `fox-verify`, `anchor-key` | yes | yes |

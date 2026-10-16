@@ -195,6 +195,22 @@ DROP TABLE (`bb.policy` op `TRUNCATE`), with the same override, the same error
 (`guardrail: TRUNCATE is blocked by policy …`) and a BLOCKED Blackbox entry
 naming the table.
 
+An agent's `UPDATE` or `DELETE` has two more guardrails, on every table, for
+agents only. One refuses a statement with no `WHERE` at all (`bb.policy` op
+`UNQUALIFIED DML`). The other counts the rows a statement changes and refuses
+it at the first row over the table's limit, whatever its `WHERE` says
+(`bb.policy` op `AGENT DML ROWS`; limits in `bb.dml_limits`, 100 rows by
+default, changed with `fox guardrail limit`):
+
+```
+ERROR:  guardrail: DELETE of more than 100 row(s) of public.orders is blocked by policy for agents (set bb.allow_destructive=on to override)
+HINT:   Narrow the statement. An admin can let one through with bb.allow_destructive=on, or change this table's limit: fox guardrail limit --table public.orders <rows>
+SQLSTATE 42501 (insufficient_privilege)
+```
+
+The attempt is recorded BLOCKED with risk `impact`. With the op set to `flag`
+the statement runs and a FLAGGED entry is recorded instead.
+
 ## Where else the object appears
 
 - `fox policy check "<SQL>"` / REST `POST /api/branches/{name}/policies/check`:
