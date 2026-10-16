@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { getAdmins, getBranches, runQuery, API, type Branch, type BranchAdmins, type QueryResult, type StatementResult } from '../api'
 import { BRAND } from '../brand'
 import { hintFor } from '../errhint'
+import CopyMenu, { cellText } from '../components/CopyMenu'
 
 type DbObject = { schema: string; name: string; type: 'table' | 'view' }
 type Tab = 'rows' | 'structure' | 'indexes'
@@ -572,7 +573,28 @@ function QueryOutput({ res, sql, expanded, onExpand }:
 
 function Grid({ res, showCommand, sql }: { res: StatementResult; showCommand?: boolean; sql?: string }) {
   const [expanded, setExpanded] = useState<number | null>(null)
-  useEffect(() => { setExpanded(null) }, [res]) // reset when new results arrive
+  // Rows ticked for copying, and one cell picked to copy on its own (⌘C).
+  const [picked, setPicked] = useState<Set<number>>(new Set())
+  const [cellAt, setCellAt] = useState<[number, number] | null>(null)
+  const [cellCopied, setCellCopied] = useState(false)
+  useEffect(() => { setExpanded(null); setPicked(new Set()); setCellAt(null) }, [res]) // reset when new results arrive
+  useEffect(() => {
+    if (!cellAt) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'c') return
+      // Text someone selected by hand is theirs to copy as they selected it.
+      if (window.getSelection()?.toString()) return
+      const tag = (document.activeElement?.tagName ?? '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return
+      const v = res.rows?.[cellAt[0]]?.[cellAt[1]]
+      e.preventDefault()
+      navigator.clipboard?.writeText(cellText(v)).then(() => {
+        setCellCopied(true); setTimeout(() => setCellCopied(false), 1500)
+      }).catch(() => { /* nothing to fall back to for one cell: the grid shows it */ })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [cellAt, res])
   if (res.error) {
     // The raw message stays: it is what a Postgres user knows how to search for.
     // The hint underneath is what a new one needs (web/src/errhint.ts).
@@ -594,28 +616,48 @@ function Grid({ res, showCommand, sql }: { res: StatementResult; showCommand?: b
   const cols = res.columns || []
   const rows = res.rows || []
   const openRow = expanded != null ? rows[expanded] : null
+  const toCopy = picked.size > 0 ? rows.filter((_, i) => picked.has(i)) : rows
+  const toggle = (i: number) => setPicked(p => { const n = new Set(p); if (n.has(i)) n.delete(i); else n.add(i); return n })
+  const all = rows.length > 0 && picked.size === rows.length
+  const copyBar = cols.length > 0 && (
+    <span className="result-tools">
+      {cellCopied && <span className="ok">Cell copied ✓</span>}
+      {cellAt && !cellCopied && <span className="muted">Cell selected: press {/Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘C' : 'Ctrl+C'} to copy it</span>}
+      <CopyMenu cols={cols} rows={toCopy} selected={picked.size} sql={sql} />
+    </span>
+  )
   return (
     <div className="result">
-      {showCommand && (
+      {showCommand ? (
         <div className="result-bar">
           <span className="ok">✓ Ran</span>
           <span className="tag">{res.command || 'ok'}</span>
           <span>{rows.length} row{rows.length === 1 ? '' : 's'}{cols.length > 0 && <> · {cols.length} column{cols.length === 1 ? '' : 's'}</>}</span>
+          {copyBar}
         </div>
-      )}
+      ) : copyBar && <div className="result-bar result-bar-tools">{copyBar}</div>}
       {cols.length > 0 ? (
         <div className="grid-wrap table-wrap">
           <table>
-            <thead><tr><th className="expand-col"></th>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
+            <thead><tr><th className="expand-col">
+              {rows.length > 0 && <input type="checkbox" aria-label="Select all rows" checked={all}
+                onChange={() => setPicked(all ? new Set() : new Set(rows.map((_, i) => i)))} />}
+            </th>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
             <tbody>
               {rows.length === 0
                 ? <tr><td colSpan={cols.length + 1} className="muted">no rows</td></tr>
                 : rows.map((r, i) => (
-                  <tr key={i}>
+                  <tr key={i} className={picked.has(i) ? 'row-picked' : undefined}>
                     <td className="expand-col">
+                      <input type="checkbox" aria-label={`Select row ${i + 1}`} checked={picked.has(i)} onChange={() => toggle(i)} />
                       <button className="expand-btn" title="View row as JSON" onClick={() => setExpanded(i)}>{'{ }'}</button>
                     </td>
-                    {r.map((v, j) => <td key={j}>{v === null ? 'NULL' : String(v)}</td>)}
+                    {r.map((v, j) => (
+                      <td key={j} className={cellAt && cellAt[0] === i && cellAt[1] === j ? 'cell-picked' : undefined}
+                        onClick={() => setCellAt(cellAt && cellAt[0] === i && cellAt[1] === j ? null : [i, j])}>
+                        {v === null ? 'NULL' : String(v)}
+                      </td>
+                    ))}
                   </tr>
                 ))}
             </tbody>

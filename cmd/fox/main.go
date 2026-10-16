@@ -81,6 +81,8 @@ Stack:
   logs [gateway|api]   Print a background server's log
   connect [branch]     Show how an application reaches a branch, then open psql on it
   psql [branch]        Open a psql shell on a branch (default 'main')
+  sql [--branch b] [--format table|csv|tsv|markdown|json|insert] "<sql>" | -
+                       Run SQL and print the result, to read or to paste (--no-header, --raw, --table <t>)
   demo seed|drop|sql [branch]
                        The sample tables (users, projects, events). A first start
                        seeds main; FOX_NO_DEMO=1 starts empty
@@ -349,6 +351,8 @@ func main() {
 		must(branch.Status())
 	case "psql":
 		must(branch.PsqlShell(argOr(os.Args[2:], "main")))
+	case "sql":
+		sqlCmd(os.Args[2:])
 	case "check":
 		checkCmd(os.Args[2:])
 	case "connect":

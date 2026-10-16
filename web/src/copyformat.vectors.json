@@ -1,0 +1,86 @@
+[
+  {
+    "name": "csv with a header: quoting, NULL as an empty field",
+    "columns": ["id", "name", "note"],
+    "rows": [[1, "Ada, Countess", null], [2, "say \"hi\"", "two\nlines"]],
+    "format": "csv", "header": true, "safe": false,
+    "want": "id,name,note\n1,\"Ada, Countess\",\n2,\"say \"\"hi\"\"\",\"two\nlines\"\n"
+  },
+  {
+    "name": "csv without a header",
+    "columns": ["a"],
+    "rows": [["x"], [true], [false]],
+    "format": "csv", "header": false, "safe": false,
+    "want": "x\ntrue\nfalse\n"
+  },
+  {
+    "name": "tsv for spreadsheets: a tab inside a value is quoted",
+    "columns": ["k", "v"],
+    "rows": [["a\tb", 1.5], ["plain", -3]],
+    "format": "tsv", "header": true, "safe": false,
+    "want": "k\tv\n\"a\tb\"\t1.5\nplain\t-3\n"
+  },
+  {
+    "name": "safe: formulas get an apostrophe, numbers (negative ones too, and numeric text) do not",
+    "columns": ["f", "n", "numeric"],
+    "rows": [["=HYPERLINK(\"x\")", -5, "-12.50"], ["@SUM(A1)", 7, "+3"], ["＝1+1", 0, "plain"]],
+    "format": "csv", "header": false, "safe": true,
+    "want": "\"'=HYPERLINK(\"\"x\"\")\",-5,-12.50\n'@SUM(A1),7,+3\n'＝1+1,0,plain\n"
+  },
+  {
+    "name": "safe tsv: a value starting with a line feed",
+    "columns": ["f"],
+    "rows": [["\n=1"]],
+    "format": "tsv", "header": false, "safe": true,
+    "want": "\"'\n=1\"\n"
+  },
+  {
+    "name": "markdown: pipes escaped, line breaks as <br>, NULL shown",
+    "columns": ["id", "text"],
+    "rows": [[1, "a|b"], [2, "one\ntwo"], [3, null]],
+    "format": "markdown", "header": true, "safe": false,
+    "want": "| id | text |\n| --- | --- |\n| 1 | a\\|b |\n| 2 | one<br>two |\n| 3 | NULL |\n"
+  },
+  {
+    "name": "json: types kept, repeated columns made unique, jsonb text kept as text",
+    "columns": ["id", "id", "ok", "doc", "missing"],
+    "rows": [[1, 2, true, "{\"a\": 1}", null]],
+    "format": "json", "header": true, "safe": false,
+    "want": "[\n  {\n    \"id\": 1,\n    \"id_2\": 2,\n    \"ok\": true,\n    \"doc\": \"{\\\"a\\\": 1}\",\n    \"missing\": null\n  }\n]\n"
+  },
+  {
+    "name": "json with no rows",
+    "columns": ["id"],
+    "rows": [],
+    "format": "json", "header": true, "safe": false,
+    "want": "[]\n"
+  },
+  {
+    "name": "json: <, > and & are not escaped",
+    "columns": ["t"],
+    "rows": [["<b>&</b>"]],
+    "format": "json", "header": true, "safe": false,
+    "want": "[\n  {\n    \"t\": \"<b>&</b>\"\n  }\n]\n"
+  },
+  {
+    "name": "insert: literals, quoting of names that need it",
+    "columns": ["id", "Name", "order", "ok", "note"],
+    "rows": [[1, "O'Brien", "first", true, null], [2.5, "x", "y", false, "z"]],
+    "format": "insert", "header": true, "safe": false, "table": "public.People",
+    "want": "INSERT INTO public.\"People\" (id, \"Name\", \"order\", ok, note) VALUES (1, 'O''Brien', 'first', TRUE, NULL);\nINSERT INTO public.\"People\" (id, \"Name\", \"order\", ok, note) VALUES (2.5, 'x', 'y', FALSE, 'z');\n"
+  },
+  {
+    "name": "insert into a table named with quotes keeps them",
+    "columns": ["a"],
+    "rows": [[1]],
+    "format": "insert", "header": true, "safe": false, "table": "\"My Table\"",
+    "want": "INSERT INTO \"My Table\" (a) VALUES (1);\n"
+  },
+  {
+    "name": "numbers written as JavaScript writes them",
+    "columns": ["n"],
+    "rows": [[1e21], [1e20], [0.0000001], [1.5e-8], [123456789]],
+    "format": "csv", "header": false, "safe": false,
+    "want": "1e+21\n100000000000000000000\n1e-7\n1.5e-8\n123456789\n"
+  }
+]

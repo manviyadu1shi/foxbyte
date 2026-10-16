@@ -604,6 +604,10 @@ type queryAs struct {
 	// query's session: the override for policy rules, which allow_destructive
 	// does not cover. Also honoured only for superusers and db_admin members.
 	AllowRules []string
+	// Label names a session with no account of its own, such as `fox sql` run
+	// by whoever administers the machine: the Blackbox records it as the
+	// actor, and App as the tool. Only when Actor is empty.
+	Label, App string
 }
 
 // runQuery executes SQL against a branch backend and returns columns/rows (or an
@@ -646,6 +650,12 @@ func runQuery(addr, sql string, as queryAs) map[string]any {
 		if _, err := conn.Exec(ctx,
 			"SELECT set_config('bb.actor',$1,false), set_config('bb.actor_kind','human',false), set_config('application_name','console',false)",
 			as.Actor); err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+	}
+	if as.Actor == "" && as.Label != "" {
+		if _, err := conn.Exec(ctx, "SELECT set_config('bb.actor',$1,false), set_config('application_name',$2,false)",
+			as.Label, as.App); err != nil {
 			return map[string]any{"error": err.Error()}
 		}
 	}

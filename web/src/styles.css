@@ -549,6 +549,21 @@ td.name-cell { white-space: nowrap; }
 .grid-wrap table td { font-family: var(--font-mono); font-size: var(--t-sm); white-space: pre; }
 .grid-wrap table td, .grid-wrap table th { padding: var(--s-2) var(--s-4); }
 .result-bar + .grid-wrap th { top: 0; }
+/* Copying a result (point 1.1): the menu, ticked rows, a picked cell. */
+.result-tools { margin-left: auto; display: inline-flex; align-items: center; gap: var(--s-3); }
+.result-bar-tools { justify-content: flex-end; }
+.copy-menu { position: relative; }
+.copy-pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; width: 280px;
+  display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3);
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .18); color: var(--text); }
+.copy-pop .fld { display: flex; flex-direction: column; gap: 4px; font-size: var(--t-sm); }
+.copy-pop .check-row { display: flex; align-items: center; gap: 6px; font-size: var(--t-sm); cursor: pointer; }
+.copy-pop .check-row input { width: auto; }
+.copy-manual { width: 100%; min-height: 120px; font-family: var(--font-mono); font-size: var(--t-xs, 12px); }
+th.expand-col input, td.expand-col input { width: auto; margin: 0 4px 0 0; vertical-align: middle; }
+tr.row-picked td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+td.cell-picked { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 @media (max-width: 900px) {
   .console-grid { grid-template-columns: 1fr; }
@@ -702,7 +717,7 @@ button.primary.danger:hover { filter: brightness(1.06); }
 @keyframes fox-spin { to { transform: rotate(360deg); } }
 
 /* --- Console: row → JSON expander --- */
-th.expand-col, td.expand-col { width: 34px; padding-left: 8px; padding-right: 0; text-align: center; }
+th.expand-col, td.expand-col { width: 58px; padding-left: 8px; padding-right: 0; text-align: center; }
 .expand-btn { font-family: var(--font-mono); font-size: 11px; line-height: 1;
   padding: 3px 5px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--panel-2); color: var(--muted); cursor: pointer; }
