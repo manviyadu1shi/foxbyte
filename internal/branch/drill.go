@@ -171,6 +171,32 @@ func promotedByWatcher(since time.Time) bool {
 	return s.HasRecentEvent(auth.EvFailoverPromoted, since)
 }
 
+// watcherRecordWait is how long a takeover drill waits for `ha watch` to record
+// a promotion it has already seen take effect.
+//
+// The watcher writes its record when HAFailover returns, and HAFailover goes on
+// for seconds after the copy starts taking writes: it rewrites the copy's role
+// passwords and resets zero-data-loss mode. The drill sees the copy serving in
+// that window, and asking the log there and then found nothing, and credited a
+// person with the watcher's promotion (integration §6b failed so, about one
+// run in two). A person's own `ha failover` records nothing, so the only way to
+// tell is to give the watcher's record time to arrive.
+var watcherRecordWait = 30 * time.Second
+
+// waitForWatcher asks check until it answers yes or wait has passed.
+func waitForWatcher(check func() bool, wait, every time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if check() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(every)
+	}
+}
+
 // Drill runs one. It is destructive of service and not of data: the primary is
 // killed and the standby promoted, which is what `fox ha failover` does on
 // purpose, and every write the standby received survives.
@@ -326,7 +352,10 @@ func DrillTakeover(o DrillOptions) (DrillResult, error) {
 			"unattended, or `%s ha failover` by hand", err, brand.CLI, brand.CLI)
 	}
 	r.TimeToService = time.Since(downAt)
-	if promotedByWatcher(downAt) {
+	// After the clock: waiting for the watcher's record is not time a client
+	// waited.
+	fmt.Println("serving. Checking whether `" + brand.CLI + " ha watch` recorded the promotion …")
+	if waitForWatcher(func() bool { return promotedByWatcher(downAt) }, watcherRecordWait, 500*time.Millisecond) {
 		r.Detection = DetectionAutomatic
 	}
 	// No Survived and no LostRows: the writer was on the machine that went

@@ -168,23 +168,34 @@ func (s *Store) Audit(kind, actor, subject, ip, detail string) {
 // HasRecentEvent reports whether an event of this kind was recorded at or after
 // t.
 //
-// Added for the drill, which needs to know whether the promotion it is
-// measuring was made by a person or by `ha watch`. Asking the log rather than
-// passing a flag around is deliberate: the watcher is a different process, so
-// there is no flag to pass, and the log is the record an incident review would
-// use to answer the same question.
-//
-// RFC3339Nano, which is how the log stores the time, sorts lexically in the
-// same order as it does chronologically for any one timezone — and every row is
-// written in UTC — so a string comparison is a time comparison here.
+// The times are compared as times. They are stored as RFC 3339 text with
+// nanoseconds, which drops trailing zeros, so the same instant can be written
+// "…:07Z" or "…:07.1Z", and as strings those do not sort as times: 'Z' sorts
+// after '.', so "…:07.1Z" came before "…:07Z", and "…:07.1Z" after
+// "…:07.10001Z". The log is append-only, so the newest events are the highest
+// ids, and only those are read.
 func (s *Store) HasRecentEvent(kind string, t time.Time) bool {
 	if s == nil || s.db == nil {
 		return false
 	}
-	var n int
-	err := s.db.QueryRow(`SELECT count(*) FROM security_events WHERE kind = ? AND at >= ?`,
-		kind, t.UTC().Format(time.RFC3339Nano)).Scan(&n)
-	return err == nil && n > 0
+	rows, err := s.db.Query(`SELECT at FROM security_events WHERE kind = ? ORDER BY id DESC LIMIT 200`, kind)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var at string
+		if rows.Scan(&at) == nil && atOrAfter(at, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// atOrAfter reports whether a stored event time is at or after t.
+func atOrAfter(at string, t time.Time) bool {
+	when, err := time.Parse(time.RFC3339Nano, at)
+	return err == nil && !when.Before(t)
 }
 
 // retryBusy runs fn until it stops reporting SQLITE_BUSY, for a few hundred
