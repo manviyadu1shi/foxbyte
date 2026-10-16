@@ -4,7 +4,7 @@ What is done and what is left of the 13 points (the expert's 12, plus the
 Aadhaar vault mode), sub-point by sub-point. The sub-points are the phases in
 `docs/FOX_Expert_Review_Plan.md`, section 6. Updated with every PR.
 
-**Last updated:** 17 October 2026: 1.1 done (copy results, `fox sql`).
+**Last updated:** 17 October 2026: 1.2 done (export what is on screen; `fox sql --format xlsx`).
 
 ## How a sub-point counts as done
 
@@ -28,7 +28,7 @@ A sub-point is ✅ only when all of these hold:
 
 | # | Point | Edition | Sub-points | Done |
 |---|---|---|---|---|
-| 1 | Console: export and copy query results | Standard | 3 | 1 |
+| 1 | Console: export and copy query results | Standard | 3 | 2 |
 | 2 | ETL: full and incremental load; Lakeflow | Enterprise | 5 | 1 (full load, existing) |
 | 3 | CIS benchmark, hardening, pgAudit | pgAudit Standard; CIS ⏸ | 4 | 0 |
 | 4 | PII scanner and access review | Enterprise | 9 | 0 |
@@ -41,7 +41,7 @@ A sub-point is ✅ only when all of these hold:
 | 11 | DPDP compliance manager | Enterprise | 4 | 0 |
 | 12 | pgAdmin features in the console | Standard | 6 | 0 |
 | 13 | Aadhaar vault mode | Enterprise | 4 | 0 |
-| | **Total** | | **55** | **2** |
+| | **Total** | | **55** | **3** |
 
 ## The points
 
@@ -50,7 +50,7 @@ A sub-point is ✅ only when all of these hold:
 | Sub-point | CLI | UI | Status | PR |
 |---|---|---|---|---|
 | 1.1 Copy cells, rows or a whole result as CSV, TSV, Markdown, JSON or `INSERT`s | ✅ `fox sql --format csv\|tsv\|markdown\|json\|insert` (§11j) | ✅ Copy menu, ticked rows, ⌘C on a cell (Playwright) | ✅ | #149 |
-| 1.2 Export what is on screen to CSV, JSON or Excel | ➖ (the CLI prints the result) | Export button | ⬜ | |
+| 1.2 Export what is on screen to CSV, JSON or Excel | ✅ `fox sql --format csv\|json\|xlsx > file` (§11j) | ✅ Export menu: CSV, JSON, Excel workbook (Playwright) | ✅ | #151 |
 | 1.3 Export the full result, streamed (`COPY … TO STDOUT`) as the user's own role; formula injection escaped in text cells; every export in the security log | `fox export "<sql>" --format csv > file` | Export "full result" | ⬜ | |
 
 ### 2. ETL: full and incremental load; Lakeflow (Enterprise)

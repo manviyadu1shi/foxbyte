@@ -4,6 +4,7 @@ import { getAdmins, getBranches, runQuery, API, type Branch, type BranchAdmins, 
 import { BRAND } from '../brand'
 import { hintFor } from '../errhint'
 import CopyMenu, { cellText } from '../components/CopyMenu'
+import ExportMenu from '../components/ExportMenu'
 
 type DbObject = { schema: string; name: string; type: 'table' | 'view' }
 type Tab = 'rows' | 'structure' | 'indexes'
@@ -624,6 +625,7 @@ function Grid({ res, showCommand, sql }: { res: StatementResult; showCommand?: b
       {cellCopied && <span className="ok">Cell copied ✓</span>}
       {cellAt && !cellCopied && <span className="muted">Cell selected: press {/Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘C' : 'Ctrl+C'} to copy it</span>}
       <CopyMenu cols={cols} rows={toCopy} selected={picked.size} sql={sql} />
+      <ExportMenu cols={cols} rows={toCopy} selected={picked.size} sql={sql} />
     </span>
   )
   return (

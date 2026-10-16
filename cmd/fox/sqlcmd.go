@@ -20,6 +20,7 @@ import (
 //	fox sql [--branch <b>] "<sql>"                       a table to read
 //	fox sql --format csv|tsv|markdown|json|insert …      to paste elsewhere
 //	        [--no-header] [--raw] [--table <t>]
+//	fox sql --format xlsx "<sql>" > result.xlsx          an Excel workbook (1.2)
 //	echo "SELECT 1" | fox sql -                          SQL from stdin
 //
 // It runs as the console does, as the shared client role (bound by row-level
@@ -42,7 +43,13 @@ func sqlCmd(args []string) {
 		sql = string(in)
 	}
 	if strings.TrimSpace(sql) == "" {
-		fmt.Printf("usage: %s sql [--branch <b>] [--format table|csv|tsv|markdown|json|insert] [--no-header] [--raw] [--table <t>] \"<sql>\" | -\n", brand.CLI)
+		fmt.Printf("usage: %s sql [--branch <b>] [--format table|csv|tsv|markdown|json|insert|xlsx] [--no-header] [--raw] [--table <t>] \"<sql>\" | -\n", brand.CLI)
+		os.Exit(2)
+	}
+	// A workbook is binary: written to a terminal it is noise that can leave
+	// the terminal in a strange state.
+	if format == "xlsx" && isTerminal(os.Stdout) {
+		fmt.Fprintf(os.Stderr, "%s sql --format xlsx writes a workbook: send it to a file, e.g. > result.xlsx\n", brand.CLI)
 		os.Exit(2)
 	}
 	out, err := controlplane.RunSQL(b, sql, cliActor())
@@ -120,7 +127,15 @@ func printSQL(w, ew io.Writer, out controlplane.SQLOutput, format string, o resu
 				pick = r
 			}
 		}
-		if pick != nil && !failed {
+		if pick != nil && !failed && format == "xlsx" {
+			b, err := resultfmt.XLSX(pick.Columns, pick.Rows)
+			if err != nil {
+				fmt.Fprintln(ew, "fox sql:", err)
+				return 2
+			}
+			_, _ = w.Write(b)
+			capped(*pick)
+		} else if pick != nil && !failed {
 			o.Format = format
 			s, err := resultfmt.Format(pick.Columns, pick.Rows, o)
 			if err != nil {
@@ -178,4 +193,10 @@ func positionals(args []string, valueFlags ...string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// isTerminal reports whether f is a terminal rather than a file or a pipe.
+func isTerminal(f *os.File) bool {
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }

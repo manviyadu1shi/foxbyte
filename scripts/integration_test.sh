@@ -1473,6 +1473,22 @@ $S sql --format insert --table cp_copy "$Q" | $S sql - >/dev/null 2>&1
 assert_eq "…INSERT statements run back into another table give the same rows" \
   "$(pg pg-main 'SELECT count(*) FROM cp_copy')|$(pg pg-main 'SELECT count(*) FROM (SELECT * FROM cp_demo EXCEPT SELECT * FROM cp_copy) d')" "2|0"
 assert_eq "…and refuse to be written without a table" "$($S sql --format insert "$Q" >/dev/null 2>&1; echo $?)" "2"
+# 1.2: an Excel workbook, opened here by a reader other than the code that
+# wrote it (Python's zipfile and its XML parser), as a spreadsheet would.
+$S sql --format xlsx "$Q" > /tmp/cp.xlsx
+assert_eq "…an Excel workbook: a sound zip whose sheet holds the rows, types kept" \
+  "$(python3 - /tmp/cp.xlsx <<'PYX'
+import sys, zipfile, xml.etree.ElementTree as ET
+z = zipfile.ZipFile(sys.argv[1])
+bad = z.testzip()
+ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+root = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+rows = root.findall('.//s:row', ns)
+a2 = root.find(".//s:c[@r='A2']", ns)
+d2 = root.find(".//s:c[@r='D2']", ns)
+print(bad, len(rows), a2.get('t'), a2.find('s:v', ns).text, ''.join(d2.itertext()))
+PYX
+)" "None 3 None 1 =1+1"
 assert_eq "SQL can come on stdin" "$(echo "SELECT 40 + 2 AS n" | $S sql --format csv --no-header -)" "42"
 OUT="$($S sql "SELECT * FROM no_such_table" 2>&1)"; RC=$?
 assert_eq "a failing statement exits 1 and says why" "$RC|$(grep -c '^ERROR: .*no_such_table' <<<"$OUT")" "1|1"
