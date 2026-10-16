@@ -28,3 +28,18 @@ func TestLimitSQL(t *testing.T) {
 		t.Errorf("removing the default:\n%s", rm)
 	}
 }
+
+func TestBudgetSQL(t *testing.T) {
+	set := budgetSQL("public.t", 1000, 3600, "cli:a")
+	for _, want := range []string{"SET bb.actor = 'cli:a';", "VALUES ('public.t', 1000, 3600)", "per_secs = EXCLUDED.per_secs"} {
+		if !strings.Contains(set, want) {
+			t.Errorf("missing %q in\n%s", want, set)
+		}
+	}
+	if rm := budgetSQL("*", -1, 0, "cli:a"); !strings.Contains(rm, "DELETE FROM bb.dml_budgets WHERE rel = '*';") {
+		t.Errorf("removing the default:\n%s", rm)
+	}
+	if _, err := SetDMLBudget("main", "", 10, 30, "x"); err == nil || !strings.Contains(err.Error(), "a minute to a week") {
+		t.Errorf("a 30-second window: %v", err)
+	}
+}

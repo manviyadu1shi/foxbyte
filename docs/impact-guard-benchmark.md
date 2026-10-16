@@ -66,9 +66,9 @@ skip the guard. The login role is the part a session cannot change.
 
 ## Not done here
 
-- **Limits across statements.** An agent can still change 100 rows at a time, a
-  statement after another. Limits per agent per time window are the plan's next
-  F2 step.
+- **Limits across statements**, since done: each agent has a budget per table
+  over a window (`fox guardrail budget`), checked by the same trigger with one
+  indexed sum at a statement's first row.
 - **Approval.** An admin's override (`bb.allow_destructive=on`) is still the way
   to let one statement through. A one-time grant bound to the statement is part
   of F2.

@@ -140,6 +140,39 @@ CREATE OR REPLACE TRIGGER key_dml_limits_history AFTER INSERT OR UPDATE OR DELET
 CREATE OR REPLACE TRIGGER key_dml_limits_history_truncate AFTER TRUNCATE ON bb.dml_limits
   FOR EACH STATEMENT EXECUTE FUNCTION bb.record_limit_change();
 
+-- How many rows one agent may change in a table over a window, across all its
+-- statements (bb.guard_impact; the expert review plan's F2): a per-statement
+-- limit alone is evaded by changing 100 rows at a time. '*' is every table
+-- without a row of its own, 1,000 rows per hour by default; without a '*' row
+-- no default budget applies. Changed with `fox guardrail budget`, and every
+-- change is in bb.policy_history.
+CREATE TABLE IF NOT EXISTS bb.dml_budgets (
+  rel      text PRIMARY KEY,   -- '*', or schema.table quoted as bb._table_identity quotes it
+  max_rows bigint NOT NULL CHECK (max_rows >= 0),
+  per_secs int NOT NULL CHECK (per_secs BETWEEN 60 AND 604800)  -- one minute to a week
+);
+INSERT INTO bb.dml_budgets (rel, max_rows, per_secs) VALUES ('*', 1000, 3600) ON CONFLICT (rel) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION bb.record_budget_change() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
+DECLARE who text := coalesce(nullif(current_setting('bb.actor', true), ''), session_user);
+BEGIN
+  IF TG_LEVEL = 'STATEMENT' THEN  -- TRUNCATE
+    INSERT INTO bb.policy_history (op, change, changed_by) VALUES ('AGENT DML BUDGET', 'truncate', who);
+    RETURN NULL;
+  END IF;
+  INSERT INTO bb.policy_history (op, change, old_action, new_action, changed_by)
+  VALUES ('AGENT DML BUDGET ' || coalesce(NEW.rel, OLD.rel), lower(TG_OP),
+          CASE WHEN TG_OP <> 'INSERT' THEN OLD.max_rows || ' rows per ' || OLD.per_secs || 's' END,
+          CASE WHEN TG_OP <> 'DELETE' THEN NEW.max_rows || ' rows per ' || NEW.per_secs || 's' END, who);
+  RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE TRIGGER key_dml_budgets_history AFTER INSERT OR UPDATE OR DELETE ON bb.dml_budgets
+  FOR EACH ROW EXECUTE FUNCTION bb.record_budget_change();
+CREATE OR REPLACE TRIGGER key_dml_budgets_history_truncate AFTER TRUNCATE ON bb.dml_budgets
+  FOR EACH STATEMENT EXECUTE FUNCTION bb.record_budget_change();
+
 
 -- Who may override a blocking policy with SET bb.allow_destructive=on: superusers
 -- (the engine's own imports and pipelines connect as one) and members of

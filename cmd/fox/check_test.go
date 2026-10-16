@@ -498,3 +498,19 @@ func TestAnchorTargetLine(t *testing.T) {
 		}
 	})
 }
+
+func TestParseWindow(t *testing.T) {
+	for in, want := range map[string]int{"1h": 3600, "90m": 5400, "1d": 86400, "7d": 604800, "1m": 60} {
+		if got, err := parseWindow(in); err != nil || got != want {
+			t.Errorf("%s: %d %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"30s", "8d", "x", "0"} {
+		if _, err := parseWindow(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+	if window(3600) != "hour" || window(1800) != "30 minutes" || window(172800) != "2 days" {
+		t.Error("window names")
+	}
+}

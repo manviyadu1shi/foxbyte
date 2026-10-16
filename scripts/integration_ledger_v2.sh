@@ -1380,6 +1380,42 @@ assert_eq "a person's 300-row DELETE runs" \
 $S branch delete v2igh >/dev/null 2>&1
 curl -sk -o /dev/null -H "$AUTH" -X DELETE "$AGENTS/agents/v2ig/branch"
 
+echo "### 10c. budgets across statements: an agent cannot change 100 rows at a time forever (expert review plan F2)"
+curl -sk -o /dev/null -H "$AUTH" -X DELETE "$AGENTS/agents/v2bg/branch"
+BDSN="$(curl -sk -H "$AUTH" -X POST "$AGENTS/agents/v2bg/branch" | jget dsn)"
+bpsql() { psql "$BDSN" -tAc "$1" 2>&1; }
+bpsql "CREATE TABLE bg(id int primary key, x int); INSERT INTO bg SELECT g, 0 FROM generate_series(1,600) g" >/dev/null
+assert_eq "fox guardrail budget shows the default: 1,000 rows per hour" \
+  "$($S guardrail budget --branch agent-v2bg 2>&1 | grep 'default' | grep -c '1000 rows per hour')" "1"
+assert_eq "…and sets one, recorded in the policy history with who did it" \
+  "$($S guardrail budget --branch agent-v2bg 250 2>&1 | grep -c 'the default is 250 rows per hour')|$(pg pg-agent-v2bg "SELECT op||'|'||new_action||'|'||(changed_by LIKE 'cli:%') FROM bb.policy_history ORDER BY id DESC LIMIT 1")" \
+  "1|AGENT DML BUDGET *|250 rows per 3600s|true"
+bpsql "UPDATE bg SET x = 1 WHERE id BETWEEN 1 AND 100" >/dev/null
+bpsql "UPDATE bg SET x = 1 WHERE id BETWEEN 101 AND 200" >/dev/null
+B0="$(pg pg-agent-v2bg 'SELECT max(id) FROM bb.schema_ledger')"
+assert_eq "two 100-row statements fit; a third that would pass 250 is refused, and changes nothing" \
+  "$(bpsql 'UPDATE bg SET x = 1 WHERE id BETWEEN 201 AND 260' | grep -c 'it would pass the budget of 250 row(s) per hour (200 changed already)')|$(pg pg-agent-v2bg 'SELECT count(*) FROM bg WHERE x = 1')" "1|200"
+assert_eq "…recorded as BLOCKED by budget" \
+  "$(pg pg-agent-v2bg "SELECT string_agg(command_tag||'|'||status||'|'||risk, ',') FROM bb.schema_ledger WHERE id > $B0")" "UPDATE|BLOCKED|budget"
+assert_eq "a rolled-back change spends nothing: 50 still fit" \
+  "$(bpsql 'BEGIN; UPDATE bg SET x = 2 WHERE id BETWEEN 201 AND 250; ROLLBACK' >/dev/null; bpsql 'UPDATE bg SET x = 1 WHERE id BETWEEN 201 AND 250' | grep -c blocked)|$(pg pg-agent-v2bg 'SELECT count(*) FROM bg WHERE x = 1')" "0|250"
+assert_eq "the same agent through MCP shares the budget, whatever name it gives itself" \
+  "$(mcp_call run_sql '{"branch":"agent-v2bg","sql":"SET bb.actor = '"'"'fresh'"'"'; UPDATE bg SET x = 3 WHERE id = 300"}' | grep -c 'it would pass the budget')" "1"
+assert_eq "an admin's override lets one through, and does not spend the budget" \
+  "$(pg pg-agent-v2bg 'SET bb.allow_destructive=on; UPDATE bg SET x = 4 WHERE id > 500' | grep -c blocked)|$(pg pg-agent-v2bg 'SELECT count(*) FROM bg WHERE x = 4')|$(pg pg-agent-v2bg "SELECT coalesce(sum(n),0) FROM bb.dml_spent WHERE actor = 'agent-v2bg'")" "0|100|250"
+assert_eq "a table's own budget lets the agent go on there" \
+  "$($S guardrail budget --branch agent-v2bg --table bg --per 30m 1000 2>&1 | grep -c 'public.bg is 1000 rows per 30 minutes')|$(bpsql 'UPDATE bg SET x = 5 WHERE id BETWEEN 301 AND 400' | grep -c blocked)" "1|0"
+assert_eq "the agent cannot raise its own budget, or forget what it spent" \
+  "$(bpsql 'UPDATE bb.dml_budgets SET max_rows = 1000000' | grep -c 'permission denied')|$(bpsql 'DELETE FROM bb.dml_spent' | grep -c 'permission denied')" "1|1"
+# execute_change names its agent at login, so its spending has a name the
+# agent's own SQL cannot change.
+pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS v2bgx; CREATE TABLE v2bgx(id int); INSERT INTO v2bgx SELECT generate_series(1,5)" >/dev/null
+mcp_exec '{"sql":"UPDATE v2bgx SET id = id + 10 WHERE id <= 5"}' >/dev/null
+assert_eq "execute_change's spending is in the agent's own name" \
+  "$(pg pg-main "SELECT actor||'|'||n FROM bb.dml_spent ORDER BY at DESC LIMIT 1")" "v2test-agent|5"
+pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS v2bgx" >/dev/null
+curl -sk -o /dev/null -H "$AUTH" -X DELETE "$AGENTS/agents/v2bg/branch"
+
 echo
 echo "==== ${PASS} passed, ${FAIL} failed ===="
 [ "$FAIL" -eq 0 ]

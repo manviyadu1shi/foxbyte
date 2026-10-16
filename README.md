@@ -101,8 +101,10 @@ inherited by every branch, capture **every** schema change and attribute it:
 - **limits on agents' changes** — an agent's `UPDATE` or `DELETE` is refused
   once it has changed more rows of a table than that table's limit (100 by
   default, whatever its `WHERE` says), and refused outright with no `WHERE` at
-  all. `fox guardrail limit [--table <t>] <rows>` changes a limit; an admin can
-  let one statement through.
+  all, and over time each agent may change at most 1,000 rows of a table per
+  hour across all its statements. `fox guardrail limit` and `fox guardrail
+  budget` change them, per table if needed; an admin can let one statement
+  through.
 
 ```bash
 fox blackbox            # every schema change on this branch, most recent first

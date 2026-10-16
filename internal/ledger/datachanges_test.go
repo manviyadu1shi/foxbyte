@@ -141,3 +141,41 @@ func TestDataChangesCreatesNoTriggerOnBlackboxTables(t *testing.T) {
 		t.Errorf("datachanges.sql creates a trigger on a Blackbox table, which every start would record: %q", m)
 	}
 }
+
+// Budgets across statements (the expert review plan's F2): a per-statement
+// limit alone is evaded by changing 100 rows at a time. The behaviour is proved
+// in integration-v2 §10c; this guards what it rests on.
+func TestAgentBudget(t *testing.T) {
+	// The budgets and their history live in ledger.sql, before the event
+	// triggers go on, at 1,000 rows per hour by default.
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS bb.dml_budgets",
+		"VALUES ('*', 1000, 3600)",
+		"AFTER INSERT OR UPDATE OR DELETE ON bb.dml_budgets",
+	} {
+		if !strings.Contains(Schema, want) {
+			t.Errorf("ledger.sql no longer contains %q", want)
+		}
+	}
+	if strings.Index(Schema, "ON bb.dml_budgets") > strings.Index(Schema, "CREATE EVENT TRIGGER bb_guard_start") {
+		t.Error("bb.dml_budgets' triggers are created after the event triggers are on")
+	}
+	for _, want := range []string{
+		"VALUES ('AGENT DML BUDGET', 'block')",
+		// Spending is logged in the statement's own transaction, so a refused
+		// or rolled-back statement spends nothing.
+		"INSERT INTO bb.dml_spent (actor, rel, n) VALUES (k.actor_key, root, k.d);",
+		// Who spends is something the session cannot change: its login role,
+		// or for the shared roles the value it logged in with.
+		"RESET bb.actor;",
+		"IF session_user NOT IN ('db_agent','db_client','dbadmin') THEN\n    RETURN session_user;",
+		// An admin's override does not spend the agent's budget.
+		"does not spend\n      -- the agent's budget",
+		// The refusal is a guardrail to the console and errhint.
+		"is blocked by policy for agents: it would pass the budget of",
+	} {
+		if !strings.Contains(SchemaData, want) {
+			t.Errorf("datachanges.sql no longer contains %q", want)
+		}
+	}
+}
