@@ -107,6 +107,40 @@ CREATE OR REPLACE TRIGGER bb_policy_history_no_truncate BEFORE TRUNCATE ON bb.po
   FOR EACH STATEMENT EXECUTE FUNCTION bb.deny_history_change();
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON bb.policy_history FROM PUBLIC;
 
+-- How many rows one agent UPDATE or DELETE may change in a table before
+-- bb.guard_impact refuses it (datachanges.sql, the expert review plan's G2).
+-- '*' is every table without a row of its own; without a '*' row no default
+-- limit applies. Changed with `fox guardrail limit`, and every change is in
+-- bb.policy_history, like a change to bb.policy.
+CREATE TABLE IF NOT EXISTS bb.dml_limits (
+  rel      text PRIMARY KEY,   -- '*', or schema.table quoted as bb._table_identity quotes it
+  max_rows bigint NOT NULL CHECK (max_rows >= 0)
+);
+INSERT INTO bb.dml_limits (rel, max_rows) VALUES ('*', 100) ON CONFLICT (rel) DO NOTHING;
+-- Nothing is granted on it: only the superuser (`fox guardrail limit`) and
+-- bb.guard_impact, which reads it, ever touch it.
+
+CREATE OR REPLACE FUNCTION bb.record_limit_change() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
+DECLARE who text := coalesce(nullif(current_setting('bb.actor', true), ''), session_user);
+BEGIN
+  IF TG_LEVEL = 'STATEMENT' THEN  -- TRUNCATE
+    INSERT INTO bb.policy_history (op, change, changed_by) VALUES ('AGENT DML ROWS', 'truncate', who);
+    RETURN NULL;
+  END IF;
+  INSERT INTO bb.policy_history (op, change, old_action, new_action, changed_by)
+  VALUES ('AGENT DML ROWS ' || coalesce(NEW.rel, OLD.rel), lower(TG_OP),
+          CASE WHEN TG_OP <> 'INSERT' THEN OLD.max_rows::text END,
+          CASE WHEN TG_OP <> 'DELETE' THEN NEW.max_rows::text END, who);
+  RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE TRIGGER key_dml_limits_history AFTER INSERT OR UPDATE OR DELETE ON bb.dml_limits
+  FOR EACH ROW EXECUTE FUNCTION bb.record_limit_change();
+CREATE OR REPLACE TRIGGER key_dml_limits_history_truncate AFTER TRUNCATE ON bb.dml_limits
+  FOR EACH STATEMENT EXECUTE FUNCTION bb.record_limit_change();
+
+
 -- Who may override a blocking policy with SET bb.allow_destructive=on: superusers
 -- (the engine's own imports and pipelines connect as one) and members of
 -- db_admin. Any other session stays blocked even with the override set. Membership
@@ -560,7 +594,7 @@ BEGIN
     IF r.command_tag = 'CREATE INDEX' AND r.object_identity ~ '_pkey$' THEN CONTINUE; END IF;
     -- The Blackbox's own data-change triggers (datachanges.sql), attached to
     -- every table: plumbing, like the objects in schema bb.
-    IF r.command_tag = 'CREATE TRIGGER' AND r.object_identity ~ '^bb_(guard_truncate|record_dml|guard_dml) on ' THEN CONTINUE; END IF;
+    IF r.command_tag = 'CREATE TRIGGER' AND r.object_identity ~ '^bb_(guard_truncate|record_dml|guard_dml|guard_impact) on ' THEN CONTINUE; END IF;
     st := 'APPLIED'; rk := NULL;
     IF r.command_tag = 'ALTER TABLE' AND EXISTS (SELECT 1 FROM unnest(t) x WHERE x ~* '\malter\M[^;]*\mtype\M') THEN
       st := 'FLAGGED'; rk := 'type-change';

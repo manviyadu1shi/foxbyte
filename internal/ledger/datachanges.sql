@@ -6,12 +6,17 @@
 -- The Blackbox's event triggers see DDL only. TRUNCATE fires no event trigger,
 -- so `TRUNCATE orders` was neither refused like DROP TABLE nor recorded, and a
 -- DELETE or UPDATE — the ordinary way an agent destroys data — left no trace.
--- Postgres runs table triggers for both, so every user table gets two:
+-- Postgres runs table triggers for both, so every user table gets these:
 --
 --   bb_guard_truncate  BEFORE TRUNCATE, per statement: the guardrail and the
 --                      record for TRUNCATE, for everyone (bb.guard_truncate)
 --   bb_record_dml      AFTER UPDATE OR DELETE, per statement: records the
 --                      statement when an agent ran it (bb.record_dml)
+--   bb_guard_dml       BEFORE UPDATE OR DELETE, per statement: refuses an
+--                      agent's statement with no WHERE (bb.guard_dml)
+--   bb_guard_impact    BEFORE UPDATE OR DELETE, per row, agents only: refuses an
+--                      agent's statement once it changes more rows of the table
+--                      than its limit (bb.guard_impact; ordinary tables only)
 --
 -- Humans' UPDATE and DELETE are not recorded: that would put a Blackbox write
 -- in every data-changing statement on main. An agent's are, because proving
@@ -150,12 +155,153 @@ BEGIN
 END;
 $$;
 
--- Attach both triggers to one table, where they are missing. Found by function,
+-- ── Policy by impact (expert review plan, G2) ────────────────────────────────
+-- "No WHERE" is read from the statement's text, so `DELETE FROM t WHERE 1=1`
+-- empties a table as surely as `DELETE FROM t` and passes. What matters is how
+-- many rows a statement changes, so an agent's UPDATE or DELETE is also refused
+-- once it has changed more rows of one table than that table's limit allows.
+--
+-- Counted row by row (bb_guard_impact, BEFORE UPDATE OR DELETE FOR EACH ROW),
+-- and refused at the first row over the limit: a mass delete stops after a
+-- hundred rows rather than running to the end and being rolled back. The other
+-- design, an AFTER statement trigger reading a transition table, holds a copy of
+-- every changed row of every statement, people's included, and can only refuse
+-- once all the work is done (docs/impact-guard-benchmark.md measures both).
+--
+-- The trigger's WHEN clause keeps people's writes out of it: a row is passed to
+-- the function only when the login role or the injected kind says agent, and
+-- the function then asks bb._ctx, which decides. The count is kept in a table
+-- only the guard can write, never in a session setting: an agent's own WHERE
+-- clause could reset a setting row by row.
+--
+-- A statement is one message from the client (statement_timestamp), so several
+-- statements sent in one message are counted together. That errs towards
+-- refusing. A partition counts towards its partitioned table.
+INSERT INTO bb.policy(op, action) VALUES ('AGENT DML ROWS', 'block') ON CONFLICT (op) DO NOTHING;
+
+-- The limits themselves (bb.dml_limits, 100 rows by default) and their
+-- history are in ledger.sql, beside bb.policy: created there before the event
+-- triggers are on, so creating them is not recorded as a change.
+
+-- The count so far, per backend and table, for the statement it was started
+-- by. Unlogged: it means nothing after a restart, and is never replicated.
+CREATE UNLOGGED TABLE IF NOT EXISTS bb.dml_counter (
+  pid      int NOT NULL,
+  rel      oid NOT NULL,
+  stmt     timestamptz NOT NULL,
+  n        bigint NOT NULL,
+  max_rows bigint,             -- NULL: no limit applies to this statement
+  action   text,
+  PRIMARY KEY (pid, rel)
+);
+
+-- The limit for a table: its own row, else the default, else none.
+CREATE OR REPLACE FUNCTION bb._dml_limit(root oid) RETURNS bigint
+LANGUAGE sql STABLE AS $$
+  SELECT l.max_rows FROM bb.dml_limits l
+  WHERE l.rel = '*' OR l.rel = (SELECT bb._table_identity(n.nspname, c.relname)
+                                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                WHERE c.oid = root)
+  ORDER BY (l.rel = '*') LIMIT 1;
+$$;
+
+CREATE OR REPLACE FUNCTION bb.guard_impact() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
+DECLARE
+  root oid := coalesce(pg_partition_root(TG_RELID), TG_RELID);
+  ts   timestamptz := statement_timestamp();
+  me   int := pg_backend_pid();
+  k    record; c record; have_c boolean := false;
+  cur bigint; lim bigint; act text; allow text; obj text;
+BEGIN
+  SELECT n, max_rows, action INTO k FROM bb.dml_counter WHERE pid = me AND rel = root AND stmt = ts;
+  IF FOUND THEN
+    IF k.max_rows IS NULL THEN
+      IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+      RETURN NEW;
+    END IF;
+    UPDATE bb.dml_counter SET n = n + 1 WHERE pid = me AND rel = root RETURNING n INTO cur;
+    lim := k.max_rows; act := k.action;
+  ELSE
+    -- This statement's first row in this table: decide once whether a limit
+    -- applies, and to whom.
+    SELECT * INTO c FROM bb._ctx();
+    have_c := true;
+    IF c.actor_kind = 'agent' AND bb._guard_on() THEN
+      SELECT action INTO act FROM bb.policy WHERE op = 'AGENT DML ROWS';
+      allow := coalesce(nullif(current_setting('bb.allow_destructive', true), ''), 'off');
+      IF act IN ('block','flag') AND NOT (allow IN ('on','true','1') AND bb._may_override()) THEN
+        lim := bb._dml_limit(root);
+      END IF;
+    END IF;
+    DELETE FROM bb.dml_counter WHERE pid = me AND stmt <> ts;   -- this backend's earlier statements
+    INSERT INTO bb.dml_counter (pid, rel, stmt, n, max_rows, action) VALUES (me, root, ts, 1, lim, act)
+      ON CONFLICT (pid, rel) DO UPDATE SET stmt = EXCLUDED.stmt, n = 1,
+        max_rows = EXCLUDED.max_rows, action = EXCLUDED.action;
+    cur := 1;
+  END IF;
+  IF lim IS NOT NULL AND cur = lim + 1 THEN
+    obj := (SELECT bb._table_identity(n.nspname, cl.relname) FROM pg_class cl
+            JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE cl.oid = root);
+    IF NOT have_c THEN
+      SELECT * INTO c FROM bb._ctx();
+    END IF;
+    IF act = 'flag' THEN
+      INSERT INTO bb.schema_ledger
+        (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
+      VALUES (c.actor,c.actor_kind,c.tool,c.session,c.branch,TG_OP,'table',obj,current_query(),'FLAGGED','impact');
+    ELSE
+      -- Recorded through a second connection, so the record survives the
+      -- rollback the refusal causes (as bb.guard_dml does).
+      IF bb._holds_chain_lock() THEN
+        RAISE WARNING 'guardrail: this blocked attempt is not recorded in Blackbox, because this transaction has already written to it';
+      ELSE
+        PERFORM dblink_exec(
+          'host=/var/run/postgresql dbname=' || current_database() || ' user=' || current_user,
+          format($f$INSERT INTO bb.schema_ledger
+                  (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
+                  VALUES (%L,%L,%L,%L,%L,%L,'table',%L,%L,'BLOCKED','impact')$f$,
+            c.actor, c.actor_kind, c.tool, c.session, c.branch, TG_OP, obj, current_query()));
+      END IF;
+      RAISE EXCEPTION 'guardrail: % of more than % row(s) of % is blocked by policy for agents (set bb.allow_destructive=on to override)', TG_OP, lim, obj
+        USING ERRCODE = 'insufficient_privilege',
+              HINT = format('Narrow the statement. An admin can let one through with bb.allow_destructive=on, or change this table''s limit: fox guardrail limit --table %s <rows>', obj);
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- The WHEN clause that keeps people's writes out of bb.guard_impact: a login
+-- role the Blackbox reads as an agent (agent-<id>, agent:<email>, db_agent), or
+-- a shared role whose injected kind says agent. It is evaluated for every row
+-- of every UPDATE and DELETE, so it names session_user once, in one LIKE ANY:
+-- each mention is a catalogue lookup per row, and a cast or a regex costs more
+-- (docs/impact-guard-benchmark.md). It is a coarse filter: anyone whose role
+-- name begins with "agent", or whose session claims to be one, reaches the
+-- function, which asks bb._ctx and lets a person by.
+CREATE OR REPLACE FUNCTION bb._impact_when() RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT $w$(session_user ~~ ANY ('{agent%,db_agent}') OR current_setting('bb.actor_kind', true) = 'agent')$w$
+$$;
+
+-- Attach the triggers to one table, where they are missing. Found by function,
 -- not name, so a trigger renamed out of the way still counts as present (and
 -- bb.data_protect_end refuses the rename anyway).
+--
+-- The impact guard goes on ordinary tables only, partitions included: a row
+-- trigger on a partitioned table would be cloned onto partitions that may
+-- already have their own, and bb.guard_impact counts a partition's rows
+-- towards its root anyway.
 CREATE OR REPLACE FUNCTION bb._attach_data_triggers(rel regclass) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
 BEGIN
+  IF (SELECT relkind FROM pg_class WHERE oid = rel) = 'r'
+     AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = rel AND tgfoid = 'bb.guard_impact()'::regprocedure) THEN
+    EXECUTE format('CREATE TRIGGER bb_guard_impact BEFORE UPDATE OR DELETE ON %s FOR EACH ROW WHEN %s EXECUTE FUNCTION bb.guard_impact()',
+                   rel, bb._impact_when());
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = rel AND tgfoid = 'bb.guard_truncate()'::regprocedure) THEN
     EXECUTE format('CREATE TRIGGER bb_guard_truncate BEFORE TRUNCATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION bb.guard_truncate()', rel);
   END IF;
@@ -212,8 +358,8 @@ BEGIN
       SELECT string_agg(t.tgname || ' on ' || t.tgrelid::regclass::text, ', ') INTO bad
       FROM pg_trigger t
       WHERE t.tgfoid IN ('bb.guard_truncate()'::regprocedure, 'bb.record_dml()'::regprocedure,
-                         'bb.guard_dml()'::regprocedure)
-        AND (t.tgenabled IN ('D','R') OR t.tgname NOT IN ('bb_guard_truncate','bb_record_dml','bb_guard_dml'))
+                         'bb.guard_dml()'::regprocedure, 'bb.guard_impact()'::regprocedure)
+        AND (t.tgenabled IN ('D','R') OR t.tgname NOT IN ('bb_guard_truncate','bb_record_dml','bb_guard_dml','bb_guard_impact'))
         AND t.tgrelid = CASE WHEN r.object_type = 'table' THEN r.objid
                              ELSE (SELECT tgrelid FROM pg_trigger WHERE oid = r.objid) END;
       IF bad IS NOT NULL THEN
@@ -233,7 +379,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
 DECLARE r record;
 BEGIN
   FOR r IN SELECT * FROM pg_event_trigger_dropped_objects() WHERE original AND object_type = 'trigger' LOOP
-    IF r.object_identity ~ '^bb_(guard_truncate|record_dml|guard_dml) on ' AND NOT bb._override_in_force() THEN
+    IF r.object_identity ~ '^bb_(guard_truncate|record_dml|guard_dml|guard_impact) on ' AND NOT bb._override_in_force() THEN
       RAISE EXCEPTION 'guardrail: the Blackbox''s data-change trigger % cannot be dropped', r.object_identity
         USING ERRCODE = 'insufficient_privilege',
               HINT = 'Only superusers and members of db_admin may, with bb.allow_destructive=on.';
