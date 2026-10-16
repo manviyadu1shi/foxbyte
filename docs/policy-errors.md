@@ -211,6 +211,18 @@ SQLSTATE 42501 (insufficient_privilege)
 The attempt is recorded BLOCKED with risk `impact`. With the op set to `flag`
 the statement runs and a FLAGGED entry is recorded instead.
 
+Across statements, each agent has a budget per table over a window (`bb.policy`
+op `AGENT DML BUDGET`; budgets in `bb.dml_budgets`, 1,000 rows per hour by
+default, changed with `fox guardrail budget`). Only committed changes spend it:
+
+```
+ERROR:  guardrail: UPDATE of public.orders is blocked by policy for agents: it would pass the budget of 1000 row(s) per hour (950 changed already) (set bb.allow_destructive=on to override)
+HINT:   Wait for the window to pass. An admin can let one through with bb.allow_destructive=on, or change this table's budget: fox guardrail budget --table public.orders <rows>
+SQLSTATE 42501 (insufficient_privilege)
+```
+
+The attempt is recorded BLOCKED with risk `budget`.
+
 ## Where else the object appears
 
 - `fox policy check "<SQL>"` / REST `POST /api/branches/{name}/policies/check`:

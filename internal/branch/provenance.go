@@ -386,6 +386,10 @@ func ExecuteChange(req ExecuteChangeRequest) (ExecuteChangeResult, error) {
 	if asAgent {
 		cfg.Password = AgentClientRolePassword()
 	}
+	// The agent's name at login, not only by set_config below: the Blackbox
+	// keys an agent's budget across statements on the login value, which the
+	// agent's own SQL cannot change (bb._budget_actor).
+	cfg.RuntimeParams["bb.actor"] = req.AgentID
 	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { res.Notices = append(res.Notices, noticeFrom(n)) }
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {

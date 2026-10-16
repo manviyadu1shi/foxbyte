@@ -207,6 +207,8 @@ Auth (admin):
   admin list [--branch <name>]            Show who may override (default: main + running branches)
   guardrail limit [--table <t>] [--branch <name>] [<rows>|none]
                                           Show or set how many rows one agent UPDATE/DELETE may change in a table
+  guardrail budget [--table <t>] [--per <1h>] [--branch <name>] [<rows>|none]
+                                          Show or set how many rows one agent may change in a table per window, across statements
 
   license [show]       The paid-edition licence, and this machine's fingerprint
   license activate <file|->   Install one  ·  license rebind  ·  license remove

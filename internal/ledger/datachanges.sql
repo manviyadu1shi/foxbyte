@@ -141,11 +141,23 @@ $$;
 
 CREATE OR REPLACE FUNCTION bb.record_dml() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
-DECLARE c record;
+DECLARE c record; root oid := coalesce(pg_partition_root(TG_RELID), TG_RELID); k record;
 BEGIN
   SELECT * INTO c FROM bb._ctx();
   IF c.actor_kind IS DISTINCT FROM 'agent' THEN
     RETURN NULL;
+  END IF;
+  -- What this statement spent of the agent's budget (bb.guard_impact counted
+  -- it). n - logged_n: statements sent in one message share a count.
+  SELECT actor_key, n - logged_n AS d, n INTO k FROM bb.dml_counter
+    WHERE pid = pg_backend_pid() AND rel = root AND stmt = statement_timestamp() AND actor_key IS NOT NULL;
+  IF FOUND AND k.d > 0 THEN
+    INSERT INTO bb.dml_spent (actor, rel, n) VALUES (k.actor_key, root, k.d);
+    UPDATE bb.dml_counter SET logged_n = k.n WHERE pid = pg_backend_pid() AND rel = root;
+    -- Spending older than the longest window (a week) can go; now and then.
+    IF random() < 0.01 THEN
+      DELETE FROM bb.dml_spent WHERE at < clock_timestamp() - interval '8 days';
+    END IF;
   END IF;
   INSERT INTO bb.schema_ledger
     (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
@@ -194,6 +206,63 @@ CREATE UNLOGGED TABLE IF NOT EXISTS bb.dml_counter (
   action   text,
   PRIMARY KEY (pid, rel)
 );
+-- The agent's budget across statements, beside the per-statement limit: how
+-- many rows it had left when the statement began (NULL: no budget applies), the
+-- budget itself, who is spending it, and how much of n has been logged as spent.
+ALTER TABLE bb.dml_counter ADD COLUMN IF NOT EXISTS budget_left bigint;
+ALTER TABLE bb.dml_counter ADD COLUMN IF NOT EXISTS budget_rows bigint;
+ALTER TABLE bb.dml_counter ADD COLUMN IF NOT EXISTS budget_secs int;
+ALTER TABLE bb.dml_counter ADD COLUMN IF NOT EXISTS budget_act text;
+ALTER TABLE bb.dml_counter ADD COLUMN IF NOT EXISTS actor_key text;
+ALTER TABLE bb.dml_counter ADD COLUMN IF NOT EXISTS logged_n bigint NOT NULL DEFAULT 0;
+
+-- ── Budgets across statements (the expert review plan's F2) ────────────────
+-- A per-statement limit is evaded by changing a hundred rows at a time, so an
+-- agent also has a budget per table over a window (bb.dml_budgets, 1,000 rows
+-- per hour by default). What each agent statement changed is logged here when
+-- it ends (bb.record_dml), in the statement's own transaction, so a statement
+-- that is refused or rolled back spends nothing. bb.guard_impact adds up the
+-- window at a statement's first row and refuses at the first row over.
+--
+-- Two sessions of the same agent writing the same table at the same moment can
+-- each see the other's spending only once it commits, so together they can go
+-- past the budget by up to one statement each. Serialising every agent write on
+-- a lock to prevent that would cost more than it saves.
+INSERT INTO bb.policy(op, action) VALUES ('AGENT DML BUDGET', 'block') ON CONFLICT (op) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS bb.dml_spent (
+  actor text NOT NULL,          -- bb._budget_actor()
+  rel   oid NOT NULL,           -- the table (a partition's root)
+  at    timestamptz NOT NULL DEFAULT clock_timestamp(),
+  n     bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dml_spent_actor_rel_at ON bb.dml_spent (actor, rel, at);
+
+-- Who is spending: something the session cannot change, or a fresh name would
+-- be a fresh budget. An agent's own login role (agent-<id>, agent:<email>) is
+-- that. The shared roles (db_agent, the engine's MCP sessions) are told the
+-- agent's name at login, and RESET returns a setting to its login value whatever
+-- the session SET since, so the value is read that way and put straight back.
+-- The name alone, so one agent is one budget whichever way it came in: an
+-- agent branch's MCP session logs in as db_agent named agent-<id>, the same key
+-- as that agent's own role. A shared-role session with no login name shares
+-- one budget per role.
+CREATE OR REPLACE FUNCTION bb._budget_actor() RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE cur text; login text;
+BEGIN
+  IF session_user NOT IN ('db_agent','db_client','dbadmin') THEN
+    RETURN session_user;
+  END IF;
+  cur := current_setting('bb.actor', true);
+  RESET bb.actor;
+  login := current_setting('bb.actor', true);
+  IF cur IS DISTINCT FROM login THEN
+    PERFORM set_config('bb.actor', cur, false);
+  END IF;
+  RETURN coalesce(nullif(login, ''), session_user || ':?');
+END;
+$$;
 
 -- The limit for a table: its own row, else the default, else none.
 CREATE OR REPLACE FUNCTION bb._dml_limit(root oid) RETURNS bigint
@@ -205,67 +274,131 @@ LANGUAGE sql STABLE AS $$
   ORDER BY (l.rel = '*') LIMIT 1;
 $$;
 
+-- The budget for a table, the same way: its own row, else the default, else none.
+CREATE OR REPLACE FUNCTION bb._dml_budget(root oid, OUT max_rows bigint, OUT per_secs int)
+LANGUAGE sql STABLE AS $$
+  SELECT b.max_rows, b.per_secs FROM bb.dml_budgets b
+  WHERE b.rel = '*' OR b.rel = (SELECT bb._table_identity(n.nspname, c.relname)
+                                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                WHERE c.oid = root)
+  ORDER BY (b.rel = '*') LIMIT 1;
+$$;
+
+-- A window as a person reads it: "per hour", "per 30 minutes", "per 2 days".
+CREATE OR REPLACE FUNCTION bb._per(secs int) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN secs = 3600 THEN 'per hour'
+    WHEN secs = 86400 THEN 'per day'
+    WHEN secs % 86400 = 0 THEN 'per ' || secs / 86400 || ' days'
+    WHEN secs % 3600 = 0 THEN 'per ' || secs / 3600 || ' hours'
+    WHEN secs % 60 = 0 THEN 'per ' || secs / 60 || ' minutes'
+    ELSE 'per ' || secs || ' seconds' END
+$$;
+
+-- Record a refusal (BLOCKED, through a second connection so it survives the
+-- rollback) or a flag (FLAGGED, in this transaction).
+CREATE OR REPLACE FUNCTION bb._record_impact(c record, op text, obj text, status text, risk text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
+BEGIN
+  IF status = 'FLAGGED' THEN
+    INSERT INTO bb.schema_ledger
+      (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
+    VALUES (c.actor,c.actor_kind,c.tool,c.session,c.branch,op,'table',obj,current_query(),'FLAGGED',risk);
+  ELSIF bb._holds_chain_lock() THEN
+    RAISE WARNING 'guardrail: this blocked attempt is not recorded in Blackbox, because this transaction has already written to it';
+  ELSE
+    PERFORM dblink_exec(
+      'host=/var/run/postgresql dbname=' || current_database() || ' user=' || current_user,
+      format($f$INSERT INTO bb.schema_ledger
+              (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
+              VALUES (%L,%L,%L,%L,%L,%L,'table',%L,%L,'BLOCKED',%L)$f$,
+        c.actor, c.actor_kind, c.tool, c.session, c.branch, op, obj, current_query(), risk));
+  END IF;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION bb.guard_impact() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
 DECLARE
   root oid := coalesce(pg_partition_root(TG_RELID), TG_RELID);
   ts   timestamptz := statement_timestamp();
   me   int := pg_backend_pid();
-  k    record; c record; have_c boolean := false;
+  k    record; c record; have_c boolean := false; b record;
   cur bigint; lim bigint; act text; allow text; obj text;
+  bleft bigint; brows bigint; bsecs int; bact text; akey text; spent bigint;
 BEGIN
-  SELECT n, max_rows, action INTO k FROM bb.dml_counter WHERE pid = me AND rel = root AND stmt = ts;
+  SELECT n, max_rows, action, budget_left, budget_rows, budget_secs, budget_act INTO k
+    FROM bb.dml_counter WHERE pid = me AND rel = root AND stmt = ts;
   IF FOUND THEN
-    IF k.max_rows IS NULL THEN
+    IF k.max_rows IS NULL AND k.budget_left IS NULL THEN
       IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
       RETURN NEW;
     END IF;
     UPDATE bb.dml_counter SET n = n + 1 WHERE pid = me AND rel = root RETURNING n INTO cur;
     lim := k.max_rows; act := k.action;
+    bleft := k.budget_left; brows := k.budget_rows; bsecs := k.budget_secs; bact := k.budget_act;
   ELSE
     -- This statement's first row in this table: decide once whether a limit
-    -- applies, and to whom.
+    -- and a budget apply, and to whom.
     SELECT * INTO c FROM bb._ctx();
     have_c := true;
     IF c.actor_kind = 'agent' AND bb._guard_on() THEN
-      SELECT action INTO act FROM bb.policy WHERE op = 'AGENT DML ROWS';
       allow := coalesce(nullif(current_setting('bb.allow_destructive', true), ''), 'off');
-      IF act IN ('block','flag') AND NOT (allow IN ('on','true','1') AND bb._may_override()) THEN
-        lim := bb._dml_limit(root);
+      -- An admin's override lets the statement through, and does not spend
+      -- the agent's budget: it was a person's decision.
+      IF NOT (allow IN ('on','true','1') AND bb._may_override()) THEN
+        SELECT action INTO act FROM bb.policy WHERE op = 'AGENT DML ROWS';
+        IF act IN ('block','flag') THEN
+          lim := bb._dml_limit(root);
+        END IF;
+        SELECT action INTO bact FROM bb.policy WHERE op = 'AGENT DML BUDGET';
+        IF bact IN ('block','flag') THEN
+          SELECT * INTO b FROM bb._dml_budget(root);
+          IF b.max_rows IS NOT NULL THEN
+            akey := bb._budget_actor();
+            SELECT coalesce(sum(s.n), 0) INTO spent FROM bb.dml_spent s
+              WHERE s.actor = akey AND s.rel = root AND s.at > clock_timestamp() - make_interval(secs => b.per_secs);
+            brows := b.max_rows; bsecs := b.per_secs; bleft := b.max_rows - spent;
+          END IF;
+        END IF;
       END IF;
     END IF;
     DELETE FROM bb.dml_counter WHERE pid = me AND stmt <> ts;   -- this backend's earlier statements
-    INSERT INTO bb.dml_counter (pid, rel, stmt, n, max_rows, action) VALUES (me, root, ts, 1, lim, act)
+    INSERT INTO bb.dml_counter (pid, rel, stmt, n, max_rows, action, budget_left, budget_rows, budget_secs, budget_act, actor_key, logged_n)
+      VALUES (me, root, ts, 1, lim, act, bleft, brows, bsecs, bact, akey, 0)
       ON CONFLICT (pid, rel) DO UPDATE SET stmt = EXCLUDED.stmt, n = 1,
-        max_rows = EXCLUDED.max_rows, action = EXCLUDED.action;
+        max_rows = EXCLUDED.max_rows, action = EXCLUDED.action,
+        budget_left = EXCLUDED.budget_left, budget_rows = EXCLUDED.budget_rows, budget_secs = EXCLUDED.budget_secs,
+        budget_act = EXCLUDED.budget_act, actor_key = EXCLUDED.actor_key, logged_n = 0;
     cur := 1;
   END IF;
-  IF lim IS NOT NULL AND cur = lim + 1 THEN
+  IF (lim IS NOT NULL AND cur = lim + 1) OR (bleft IS NOT NULL AND cur = greatest(bleft, 0) + 1) THEN
     obj := (SELECT bb._table_identity(n.nspname, cl.relname) FROM pg_class cl
             JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE cl.oid = root);
     IF NOT have_c THEN
       SELECT * INTO c FROM bb._ctx();
     END IF;
+  END IF;
+  IF lim IS NOT NULL AND cur = lim + 1 THEN
     IF act = 'flag' THEN
-      INSERT INTO bb.schema_ledger
-        (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
-      VALUES (c.actor,c.actor_kind,c.tool,c.session,c.branch,TG_OP,'table',obj,current_query(),'FLAGGED','impact');
+      PERFORM bb._record_impact(c, TG_OP, obj, 'FLAGGED', 'impact');
     ELSE
-      -- Recorded through a second connection, so the record survives the
-      -- rollback the refusal causes (as bb.guard_dml does).
-      IF bb._holds_chain_lock() THEN
-        RAISE WARNING 'guardrail: this blocked attempt is not recorded in Blackbox, because this transaction has already written to it';
-      ELSE
-        PERFORM dblink_exec(
-          'host=/var/run/postgresql dbname=' || current_database() || ' user=' || current_user,
-          format($f$INSERT INTO bb.schema_ledger
-                  (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
-                  VALUES (%L,%L,%L,%L,%L,%L,'table',%L,%L,'BLOCKED','impact')$f$,
-            c.actor, c.actor_kind, c.tool, c.session, c.branch, TG_OP, obj, current_query()));
-      END IF;
+      PERFORM bb._record_impact(c, TG_OP, obj, 'BLOCKED', 'impact');
       RAISE EXCEPTION 'guardrail: % of more than % row(s) of % is blocked by policy for agents (set bb.allow_destructive=on to override)', TG_OP, lim, obj
         USING ERRCODE = 'insufficient_privilege',
               HINT = format('Narrow the statement. An admin can let one through with bb.allow_destructive=on, or change this table''s limit: fox guardrail limit --table %s <rows>', obj);
+    END IF;
+  END IF;
+  IF bleft IS NOT NULL AND cur = greatest(bleft, 0) + 1 THEN
+    IF bact = 'flag' THEN
+      PERFORM bb._record_impact(c, TG_OP, obj, 'FLAGGED', 'budget');
+    ELSE
+      PERFORM bb._record_impact(c, TG_OP, obj, 'BLOCKED', 'budget');
+      RAISE EXCEPTION 'guardrail: % of % is blocked by policy for agents: it would pass the budget of % row(s) % (% changed already) (set bb.allow_destructive=on to override)',
+          TG_OP, obj, brows, bb._per(bsecs), brows - bleft
+        USING ERRCODE = 'insufficient_privilege',
+              HINT = format('Wait for the window to pass. An admin can let one through with bb.allow_destructive=on, or change this table''s budget: fox guardrail budget --table %s <rows>', obj);
     END IF;
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
