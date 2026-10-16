@@ -1449,6 +1449,39 @@ assert_eq "the next start puts it back" "$(pg pg-dblimp "SELECT count(*) FROM pg
 assert_contains "…and a refused change is reported as one again" "$(client pg-dblimp 'DROP TABLE dbl_t')" "guardrail: DROP TABLE is blocked by policy"
 $S branch delete dblimp >/dev/null 2>&1
 
+echo "### 11j. fox sql: run SQL and copy the result (point 1.1)"
+# The console's Copy menu writes the same text (web/src/copyformat.ts): both
+# follow web/src/copyformat.vectors.json, which the unit tests of each check.
+pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS cp_demo; DROP TABLE IF EXISTS cp_copy; DROP TABLE IF EXISTS cp_bb;
+  CREATE TABLE cp_demo (id int, name text, note text, f text);
+  INSERT INTO cp_demo VALUES (1, 'Ada, Countess', NULL, '=1+1'), (2, 'say \"hi\"', E'two\nlines', '-5');
+  GRANT ALL ON cp_demo TO db_client;" >/dev/null
+Q="SELECT id, name, note, f FROM cp_demo ORDER BY id"
+OUT="$($S sql "SELECT id, name FROM cp_demo ORDER BY id" 2>&1)"
+assert_eq "fox sql prints a table to read" "$(grep -c '^id  *name' <<<"$OUT")|$(grep -c '(2 rows)' <<<"$OUT")" "1|1"
+assert_eq "…CSV: quoted where needed, NULL empty, a formula escaped, a negative number left alone" \
+  "$($S sql --format csv "$Q")" $'id,name,note,f\n1,"Ada, Countess",,\'=1+1\n2,"say ""hi""","two\nlines",-5'
+assert_eq "…--raw leaves a formula as it is" "$($S sql --format csv --raw --no-header "SELECT f FROM cp_demo WHERE id = 1")" "=1+1"
+assert_eq "…tab-separated, without the header" "$($S sql --format tsv --no-header "SELECT id, name FROM cp_demo WHERE id = 1")" $'1\tAda, Countess'
+assert_eq "…Markdown" "$($S sql --format markdown "SELECT id, note FROM cp_demo ORDER BY id")" $'| id | note |\n| --- | --- |\n| 1 | NULL |\n| 2 | two<br>lines |'
+assert_eq "…JSON keeps the types" \
+  "$($S sql --format json "$Q" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d), d[0]["id"], d[0]["note"], d[1]["name"])')" '2 1 None say "hi"'
+# INSERTs are the one format meant to be run again: paste them into another
+# table and it must hold the same rows.
+pg pg-main "CREATE TABLE cp_copy (LIKE cp_demo); GRANT ALL ON cp_copy TO db_client;" >/dev/null
+$S sql --format insert --table cp_copy "$Q" | $S sql - >/dev/null 2>&1
+assert_eq "…INSERT statements run back into another table give the same rows" \
+  "$(pg pg-main 'SELECT count(*) FROM cp_copy')|$(pg pg-main 'SELECT count(*) FROM (SELECT * FROM cp_demo EXCEPT SELECT * FROM cp_copy) d')" "2|0"
+assert_eq "…and refuse to be written without a table" "$($S sql --format insert "$Q" >/dev/null 2>&1; echo $?)" "2"
+assert_eq "SQL can come on stdin" "$(echo "SELECT 40 + 2 AS n" | $S sql --format csv --no-header -)" "42"
+OUT="$($S sql "SELECT * FROM no_such_table" 2>&1)"; RC=$?
+assert_eq "a failing statement exits 1 and says why" "$RC|$(grep -c '^ERROR: .*no_such_table' <<<"$OUT")" "1|1"
+assert_eq "it runs as the client role, not the superuser" "$($S sql --format csv --no-header "SELECT current_user")" "db_client"
+$S sql "CREATE TABLE cp_bb (x int)" >/dev/null 2>&1
+assert_eq "…and the Blackbox names who ran it, and with what" \
+  "$(pg pg-main "SELECT (actor LIKE 'cli:%')::text || '|' || tool FROM bb.schema_ledger WHERE object_identity = 'public.cp_bb' ORDER BY id DESC LIMIT 1")" "true|fox sql"
+pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS cp_demo; DROP TABLE IF EXISTS cp_copy; DROP TABLE IF EXISTS cp_bb" >/dev/null
+
 echo "### 12. fox uninstall (B1)"
 # Removal used to be a list of commands to run by hand. This runs last: it takes
 # the stack apart, so nothing after it has a stack to use.
