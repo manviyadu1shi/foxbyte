@@ -49,7 +49,7 @@ A sub-point is ✅ only when all of these hold:
 
 | Sub-point | CLI | UI | Status | PR |
 |---|---|---|---|---|
-| 1.1 Copy cells, rows or a whole result as CSV, TSV, Markdown, JSON or `INSERT`s | ✅ `fox sql --format csv\|tsv\|markdown\|json\|insert` (§11j) | ✅ Copy menu, ticked rows, ⌘C on a cell (Playwright) | ✅ | `feat/copy-results` |
+| 1.1 Copy cells, rows or a whole result as CSV, TSV, Markdown, JSON or `INSERT`s | ✅ `fox sql --format csv\|tsv\|markdown\|json\|insert` (§11j) | ✅ Copy menu, ticked rows, ⌘C on a cell (Playwright) | ✅ | #149 |
 | 1.2 Export what is on screen to CSV, JSON or Excel | ➖ (the CLI prints the result) | Export button | ⬜ | |
 | 1.3 Export the full result, streamed (`COPY … TO STDOUT`) as the user's own role; formula injection escaped in text cells; every export in the security log | `fox export "<sql>" --format csv > file` | Export "full result" | ⬜ | |
 
