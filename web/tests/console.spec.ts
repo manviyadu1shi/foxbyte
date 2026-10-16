@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test, expect, type Page } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 
 const email = process.env.FOX_E2E_EMAIL ?? 'e2e@foxbyte.dev'
 const password = process.env.FOX_E2E_PASSWORD ?? 'password123'
@@ -405,4 +407,42 @@ test('a result can be copied as CSV, as Markdown for ticked rows, and one cell a
   await expect(page.getByText(/cell selected/i)).toBeVisible()
   await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(clip).toBe('Ada, Countess')
+})
+
+// Point 1.2: what is on screen can be downloaded as CSV, JSON or an Excel
+// workbook. The workbook is opened by a reader other than the code that wrote
+// it (Python's zipfile and XML parser), as a spreadsheet would.
+test('a result can be exported as CSV and as an Excel workbook', async ({ page }) => {
+  await signIn(page)
+  await page.goto('/console', { waitUntil: 'domcontentloaded' })
+  await page.locator('select').first().selectOption(branch)
+  const t = `e2e_export_${Date.now().toString().slice(-6)}`
+  await page.locator('textarea.editor').fill(
+    `CREATE TABLE ${t} (id int, name text, ok boolean); INSERT INTO ${t} VALUES (1, 'Ada, Countess', true), (2, '=1+1', NULL);`)
+  await page.getByRole('button', { name: /^run/i }).click()
+  await expect(page.locator('.res-tab')).toHaveCount(2, { timeout: 30_000 })
+  await page.locator('textarea.editor').fill(`SELECT id, name, ok FROM ${t} ORDER BY id`)
+  await page.getByRole('button', { name: /^run/i }).click()
+  await expect(page.locator('.grid-wrap td:not(.expand-col)').first()).toHaveText('1', { timeout: 30_000 })
+
+  await page.getByRole('button', { name: 'Export ▾' }).click()
+  await page.getByLabel('Export format').selectOption('csv')
+  let [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /download all 2 rows/i }).click()])
+  expect(dl.suggestedFilename()).toMatch(new RegExp(`^${t}-\\d{8}-\\d{4}\\.csv$`))
+  expect(readFileSync(await dl.path(), 'utf8')).toBe('id,name,ok\n1,"Ada, Countess",true\n2,\'=1+1,\n')
+
+  await page.getByLabel('Export format').selectOption('xlsx')
+  ;[dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: /download all 2 rows/i }).click()])
+  expect(dl.suggestedFilename()).toMatch(/\.xlsx$/)
+  const read = execFileSync('python3', ['-c', `
+import sys, zipfile, xml.etree.ElementTree as ET
+z = zipfile.ZipFile(sys.argv[1])
+ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+r = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+c = lambda ref: r.find(".//s:c[@r='%s']" % ref, ns)
+print(z.testzip(), c('A2').find('s:v', ns).text, ''.join(c('B2').itertext()), c('C2').get('t'), c('C3'), ''.join(c('B3').itertext()))
+`, await dl.path()], { encoding: 'utf8' }).trim()
+  // A sound zip; 1 as a number; the comma kept; true as a boolean; NULL empty;
+  // and a formula kept as text rather than escaped, since a typed cell is never run.
+  expect(read).toBe('None 1 Ada, Countess b None =1+1')
 })

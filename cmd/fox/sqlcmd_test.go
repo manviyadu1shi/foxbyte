@@ -3,6 +3,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"strings"
 	"testing"
@@ -69,5 +70,20 @@ func TestPositionals(t *testing.T) {
 	got := positionals([]string{"--branch", "qa", "SELECT", "1", "--raw", "--format", "csv", "-"}, "--branch", "--format", "--table")
 	if strings.Join(got, " ") != "SELECT 1 -" {
 		t.Errorf("%v", got)
+	}
+}
+
+// An Excel workbook is written as bytes: a zip whose sheet holds the result.
+func TestPrintSQLXLSX(t *testing.T) {
+	out := controlplane.SQLOutput{Results: []controlplane.SQLResult{
+		{Columns: []string{"id"}, Rows: [][]any{{int64(7)}}, Command: "SELECT 1"},
+	}}
+	got, _, code := run(out, "xlsx", resultfmt.Options{})
+	if code != 0 || !strings.HasPrefix(got, "PK\x03\x04") {
+		t.Fatalf("code %d, starts %q", code, got[:min(4, len(got))])
+	}
+	z, err := zip.NewReader(strings.NewReader(got), int64(len(got)))
+	if err != nil || len(z.File) != 5 {
+		t.Fatalf("not a workbook: %v", err)
 	}
 }

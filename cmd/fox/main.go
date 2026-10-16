@@ -81,7 +81,7 @@ Stack:
   logs [gateway|api]   Print a background server's log
   connect [branch]     Show how an application reaches a branch, then open psql on it
   psql [branch]        Open a psql shell on a branch (default 'main')
-  sql [--branch b] [--format table|csv|tsv|markdown|json|insert] "<sql>" | -
+  sql [--branch b] [--format table|csv|tsv|markdown|json|insert|xlsx] "<sql>" | -
                        Run SQL and print the result, to read or to paste (--no-header, --raw, --table <t>)
   demo seed|drop|sql [branch]
                        The sample tables (users, projects, events). A first start
