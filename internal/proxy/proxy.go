@@ -290,6 +290,7 @@ func handle(client net.Conn) {
 	// Gateway authentication: the client's password must be a valid API key.
 	// The authenticated identity becomes the ledger "actor" for this session.
 	var actor, keyScope string
+	var agentKey bool
 	var account auth.User
 	if authStore != nil {
 		key, err := requestClientPassword(client)
@@ -315,6 +316,7 @@ func handle(client net.Conn) {
 			return
 		}
 		actor, keyScope, account = u.Email, scope, u
+		agentKey = kind == auth.KindAgent
 	}
 	// Authenticated: the startup deadline has done its job. Waking a
 	// suspended branch can take longer, and a session may idle for hours.
@@ -405,6 +407,28 @@ func handle(client net.Conn) {
 		// would reset this role's password and break the DSN already issued.
 		loginUser = keyScope
 		backendPass = branch.AgentRolePassword(keyScope)
+	case agentKey:
+		// An agent key: its owner's branches, as an agent ("agent:<email>"),
+		// so the Blackbox records an agent and the agent-only guardrails apply
+		// (branch/agentrole.go). Never the shared role on failure: that would
+		// make it a person again, which is what this kind exists to prevent.
+		role := branch.AgentKeyRole(actor)
+		if err := branch.EnsureAgentKeyRole(target, actor); err != nil {
+			log.Printf("agent role %q on %s: %v", role, target, err)
+			msg := fmt.Sprintf("could not log this agent key in to branch %q", target)
+			if errors.Is(err, branch.ErrAgentRolesNeedUpgrade) {
+				msg = fmt.Sprintf("branch %q predates agent keys: upgrade its Blackbox with `%s ledger upgrade %s`, or use an account key", target, brand.CLI, target)
+			}
+			sendError(client, "28000", msg)
+			return
+		}
+		if standbyRead && !branch.StandbyKnowsRole(role) {
+			// As for a person below: a read-only session has nothing to be
+			// attributed for.
+			log.Printf("standby read: role %q not replayed yet (using %s)", role, realUser)
+		} else {
+			loginUser, backendPass = role, branch.AgentKeyRolePassword(actor)
+		}
 	case actor != "":
 		if err := branch.EnsureUserRole(target, actor); err != nil {
 			log.Printf("per-user role %q on %s: %v (using %s)", actor, target, err, realUser)
@@ -428,7 +452,7 @@ func handle(client net.Conn) {
 	// Attribution for the Blackbox: inject connection context that the
 	// branch's DDL event triggers read via current_setting('foxbyte.*'). For a
 	// per-user login this is a fallback/display value; session_user is authoritative.
-	params["options"] = ledgerOptions(params["options"], actor, target, keyScope == "")
+	params["options"] = ledgerOptions(params["options"], actor, target, keyScope == "", agentKey)
 	if err := backendAuth(backend, params, backendPass); err != nil {
 		log.Printf("backend auth %s: %v", addr, err)
 		sendError(client, "08006", fmt.Sprintf("branch %q authentication failed", target))

@@ -25,7 +25,9 @@ func TestClassifyRole(t *testing.T) {
 		{ClientRole, roleClient},
 		{ReplicationRole, roleReplica},
 		{RealtimeRole, roleRealtime},
+		{AgentClientRole, roleAgentClient},
 		{"alice@example.com", roleUser},
+		{AgentKeyRole("alice@example.com"), roleUser},
 		{"agent-7", roleAgent},
 		{"demo", roleAgent},
 		// Not ours: a group role with no password, Postgres's own roles, and

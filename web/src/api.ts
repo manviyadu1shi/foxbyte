@@ -62,7 +62,10 @@ export type QueryResult = StatementResult & {
   // the script opens its own, so nothing it did survives.
   note?: string
 }
-export type ApiKey = { id: string; name: string; prefix: string; created: number }
+// kind is empty for an account key; 'agent' for a key to give an AI agent, which
+// the Gateway logs in as an agent and the console refuses; 'realtime' for a
+// change-feed key. scope names the one branch a scoped key opens.
+export type ApiKey = { id: string; name: string; prefix: string; created: number; kind?: string; scope?: string }
 export type Providers = { github: boolean; google: boolean; signup: boolean; setup?: boolean }
 
 export class ApiError extends Error {
@@ -129,7 +132,8 @@ export const oauthUrl = (provider: 'github' | 'google') => `${API}/auth/oauth/${
 export const changePassword = (current: string, next: string) =>
   req('POST', `${API}/api/account/password`, { current, new: next }) as Promise<{ status: string; note: string }>
 export const listKeys = () => req('GET', `${API}/api/keys`) as Promise<{ keys: ApiKey[] }>
-export const createKey = (name: string) => req('POST', `${API}/api/keys`, { name }) as Promise<{ key: string; info: ApiKey }>
+export const createKey = (name: string, kind: '' | 'agent' = '') =>
+  req('POST', `${API}/api/keys`, kind ? { name, kind } : { name }) as Promise<{ key: string; info: ApiKey }>
 export const revokeKey = (id: string) => req('DELETE', `${API}/api/keys/${encodeURIComponent(id)}`)
 
 // --- the change feed (Enterprise) ---

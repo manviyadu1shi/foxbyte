@@ -36,13 +36,14 @@ import (
 type roleClass int
 
 const (
-	roleUnknown  roleClass = iota
-	roleSuper              // the bootstrap superuser
-	roleClient             // the shared application role
-	roleReplica            // the replication role
-	roleRealtime           // the change feed's decoder
-	roleUser               // a per-person role, named by email address
-	roleAgent              // an agent's role, named for its branch
+	roleUnknown     roleClass = iota
+	roleSuper                 // the bootstrap superuser
+	roleClient                // the shared application role
+	roleReplica               // the replication role
+	roleRealtime              // the change feed's decoder
+	roleUser                  // a per-person role, named by email address
+	roleAgent                 // an agent's role, named for its branch
+	roleAgentClient           // the engine's agent sessions (db_agent)
 )
 
 // classifyRole decides which derivation names a role, given a way to ask
@@ -64,10 +65,14 @@ func classifyRole(name string, isBranch func(string) bool) roleClass {
 		return roleReplica
 	case RealtimeRole:
 		return roleRealtime
+	case AgentClientRole:
+		return roleAgentClient
 	}
 	// A per-user role is named by the address it belongs to, and an address is
 	// the only name here that can contain '@' — ErrBadName rejects it for a
-	// branch, and these are the only two kinds of name the engine creates.
+	// branch, and these are the only two kinds of name the engine creates. An
+	// agent key's role ("agent:<email>") contains one too, and its password is
+	// derived the same way, from its own name (AgentKeyRolePassword).
 	if strings.Contains(name, "@") {
 		return roleUser
 	}
@@ -92,6 +97,8 @@ func rolePasswordFor(class roleClass, name string) (string, bool) {
 		return UserRolePassword(name), true
 	case roleAgent:
 		return AgentRolePassword(name), true
+	case roleAgentClient:
+		return AgentClientRolePassword(), true
 	}
 	return "", false
 }

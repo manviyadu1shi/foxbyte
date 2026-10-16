@@ -160,13 +160,15 @@ assert_eq "agent cannot override the guardrail" \
   "$(psql "$DSN" -tAc "SET bb.allow_destructive=on; DROP TABLE a" 2>&1 | grep -c 'blocked by policy')" "1"
 assert_eq "MCP list_branches does not expose a password" \
   "$(mcp_call list_branches '{}' | grep -c 'postgresql://agent-v2itest@')" "1"
-assert_eq "MCP run_sql runs as the client role" "$(mcp_call run_sql '{"sql":"SELECT session_user"}' | grep -c 'db_client')" "1"
+# G1: as the agent role (db_agent), a member of db_client with its access
+# exactly — no longer db_client itself, whose kind a session could change.
+assert_eq "MCP run_sql runs as the agent role" "$(mcp_call run_sql '{"sql":"SELECT session_user"}' | grep -c 'db_agent')" "1"
 assert_eq "MCP run_sql cannot disable triggers" \
   "$(mcp_call run_sql '{"sql":"SET session_replication_role=replica"}' | grep -c 'permission denied')" "1"
 # Audit v2 G05: the switch is compiled out of release builds (this suite runs
 # one), so setting it changes nothing.
 assert_eq "FOX_MCP_SUPERUSER=1 is ignored by a release build" \
-  "$(mcp_call run_sql '{"sql":"SELECT session_user"}' FOX_MCP_SUPERUSER=1 | grep -c 'db_client')" "1"
+  "$(mcp_call run_sql '{"sql":"SELECT session_user"}' FOX_MCP_SUPERUSER=1 | grep -c 'db_agent')" "1"
 # K6: the MCP server acts as an API key's account, and refuses to run without one.
 assert_eq "fox mcp without a key exits non-zero" \
   "$(printf '' | $S mcp >/dev/null 2>/tmp/mcpnokey.log; echo $?)" "1"
@@ -200,6 +202,64 @@ assert_eq "a human claiming to be an agent is still recorded as human" \
 psql "$DSN" -q -c "SET bb.actor_kind='human'; CREATE TABLE h3agent(x int);" >/dev/null 2>&1
 assert_eq "an agent claiming to be human is still recorded as an agent" \
   "$(pg pg-agent-v2itest "SELECT DISTINCT actor||'/'||actor_kind FROM bb.schema_ledger WHERE object_identity='public.h3agent'")" "agent-v2itest/agent"
+
+# G1 (expert review plan, section 3): the engine's own agent sessions are
+# agents by login too. MCP's SQL used to log in as db_client and say "agent"
+# in a setting, so the agent's own SQL could say "human" and step out of the
+# agent-only guardrails.
+mcp_call run_sql '{"branch":"v2h3","sql":"SET bb.actor_kind = human; CREATE TABLE h3mcpesc(x int); INSERT INTO h3mcpesc VALUES (1),(2)"}' >/dev/null
+assert_eq "an MCP session claiming to be human is still recorded as an agent" \
+  "$(pg pg-v2h3 "SELECT DISTINCT actor||'/'||actor_kind FROM bb.schema_ledger WHERE object_identity='public.h3mcpesc'")" "$USER_EMAIL/agent"
+assert_eq "…and the agent guardrail still refuses its DELETE with no WHERE" \
+  "$(mcp_call run_sql '{"branch":"v2h3","sql":"SET bb.actor_kind = human; DELETE FROM h3mcpesc"}' | grep -c 'with no WHERE is blocked')|$(pg pg-v2h3 'SELECT count(*) FROM h3mcpesc')" "1|2"
+
+# G1: an agent given a person's key was that person. An agent key opens its
+# owner's branches as an agent.
+# The account outlives a run, so a key left by an earlier one goes first.
+for k in $($S apikey list "$USER_EMAIL" 2>/dev/null | awk '$2 == "v2bot" { print $1 }'); do
+  $S apikey revoke "$USER_EMAIL" "$k" >/dev/null 2>&1
+done
+AGKEY="$($S apikey create "$USER_EMAIL" v2bot --agent 2>/dev/null | grep -o 'key_[A-Za-z0-9_-]*')"
+assert_eq "an agent key is minted, and listed as one" \
+  "$([ -n "$AGKEY" ] && echo yes)|$($S apikey list "$USER_EMAIL" 2>/dev/null | grep 'v2bot' | grep -c ' agent ')" "yes|1"
+assert_eq "it logs in through the Gateway as the account's agent role" \
+  "$(gw "$AGKEY" v2h3 'SELECT session_user')" "agent:$USER_EMAIL"
+gw "$AGKEY" v2h3 "SET bb.actor_kind = human; CREATE TABLE h3agkey(x int); INSERT INTO h3agkey VALUES (1),(2)" >/dev/null
+assert_eq "…is recorded as an agent, whatever its session says" \
+  "$(pg pg-v2h3 "SELECT DISTINCT actor||'/'||actor_kind FROM bb.schema_ledger WHERE object_identity='public.h3agkey'")" "agent:$USER_EMAIL/agent"
+assert_eq "…so the agent guardrail refuses its DELETE with no WHERE" \
+  "$(gw "$AGKEY" v2h3 'DELETE FROM h3agkey' | grep -c 'with no WHERE is blocked')|$(pg pg-v2h3 'SELECT count(*) FROM h3agkey')" "1|2"
+$S admin grant "$USER_EMAIL" --branch v2h3 >/dev/null 2>&1
+assert_eq "…and it cannot override a guardrail, even when its owner is an admin" \
+  "$(gw "$AGKEY" v2h3 'SET bb.allow_destructive=on; DROP TABLE h3agkey' | grep -c 'blocked by policy')|$(pg pg-v2h3 "SELECT to_regclass('public.h3agkey') IS NOT NULL")" "1|t"
+$S admin revoke "$USER_EMAIL" --branch v2h3 >/dev/null 2>&1
+assert_eq "the owner's own key is still a person's" \
+  "$(gw "$KEY" v2h3 'DELETE FROM h3agkey' | grep -c 'blocked')|$(pg pg-v2h3 'SELECT count(*) FROM h3agkey')" "0|0"
+assert_eq "the control plane refuses an agent key" \
+  "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGKEY" "$API/api/branches")" "401"
+assert_eq "…and the Agent API accepts one" \
+  "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGKEY" "$AGENTS/agents")" "200"
+assert_eq "MCP names an agent key's calls as the agent" \
+  "$(mcp_call run_sql '{"branch":"v2h3","sql":"CREATE TABLE h3mcpak(x int)"}' FOX_API_KEY="$AGKEY" >/dev/null; pg pg-v2h3 "SELECT DISTINCT actor||'/'||actor_kind FROM bb.schema_ledger WHERE object_identity='public.h3mcpak'")" "agent:$USER_EMAIL/agent"
+# A branch keeps the Blackbox it was cloned with until `fox ledger upgrade`, and
+# one from before agent roles would take them for people. Simulated by taking
+# db_agent out of this branch's bb._ctx.
+$S branch create v2old >/dev/null 2>&1
+$S branch owner v2old "$USER_EMAIL" >/dev/null 2>&1
+pg pg-v2old "DO \$\$ BEGIN EXECUTE replace(pg_get_functiondef('bb._ctx()'::regprocedure), 'db_agent', 'zz_gone'); END \$\$" >/dev/null
+assert_eq "on an older Blackbox, MCP keeps the shared role it always used" \
+  "$(mcp_call run_sql '{"branch":"v2old","sql":"SELECT session_user"}' | grep -c 'db_client')" "1"
+mcp_call run_sql '{"branch":"v2old","sql":"CREATE TABLE oldmcp(x int)"}' >/dev/null
+assert_eq "…still recorded as an agent, as before" \
+  "$(pg pg-v2old "SELECT DISTINCT actor_kind FROM bb.schema_ledger WHERE object_identity='public.oldmcp'")" "agent"
+# psql may print the refusal twice (sslmode=prefer retries without TLS), so this
+# asks whether it said so at all. grep -c, not -q: -q stops reading at the first
+# match, psql dies writing the second, and pipefail reports the pipe as failed.
+assert_eq "…an agent key is refused there, naming the fix" \
+  "$(gw "$AGKEY" v2old 'SELECT 1' | grep -c 'ledger upgrade v2old' | awk '{ print ($1 > 0 ? "yes" : "no") }')" "yes"
+$S ledger upgrade v2old >/dev/null 2>&1
+assert_eq "…and works once the branch is upgraded" "$(gw "$AGKEY" v2old 'SELECT session_user')" "agent:$USER_EMAIL"
+$S branch delete v2old >/dev/null 2>&1
 $S branch delete v2h3 >/dev/null 2>&1
 curl -sk -H "$AUTH" -X DELETE "$AGENTS/agents/v2itest/branch" >/dev/null 2>&1
 
@@ -1252,6 +1312,13 @@ assert_eq "the agent cannot drop the Blackbox trigger on its own table" \
   "$(apsql 'DROP TRIGGER bb_record_dml ON ad' | grep -c 'cannot be dropped')" "1"
 assert_eq "…nor disable it" "$(apsql 'ALTER TABLE ad DISABLE TRIGGER ALL' | grep -c 'cannot be disabled or renamed')" "1"
 assert_eq "…nor rename it out of the way" "$(apsql 'ALTER TRIGGER bb_record_dml ON ad RENAME TO x' | grep -c 'cannot be disabled or renamed')" "1"
+# G4 (expert review plan, section 3): a trigger that fires only in replica mode
+# never fires in an ordinary session, and a table's owner may set that without
+# being a superuser.
+assert_eq "…nor make it fire only in replica mode" \
+  "$(apsql 'ALTER TABLE ad ENABLE REPLICA TRIGGER bb_guard_truncate' | grep -c 'nor made replica-only')|$(pg pg-agent-v2dc "SELECT tgenabled FROM pg_trigger WHERE tgrelid = 'public.ad'::regclass AND tgname = 'bb_guard_truncate'")" "1|O"
+assert_eq "…while making it fire in every session is allowed" \
+  "$(apsql 'ALTER TABLE ad ENABLE ALWAYS TRIGGER bb_record_dml' | grep -c 'cannot')" "0"
 assert_eq "…and both are still there, enabled" \
   "$(pg pg-agent-v2dc "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.ad'::regclass AND tgname IN ('bb_guard_truncate','bb_record_dml') AND tgenabled <> 'D'")" "2"
 assert_eq "a table made by CREATE TABLE AS gets them too" \

@@ -25,8 +25,17 @@ func TestActorKindDerivedFromRole(t *testing.T) {
 		// …unless the role is named for an email address (a person whose
 		// address happens to start with "agent-").
 		"position('@' in session_user) = 0",
+		// The engine's agent role, and an agent key's role, which is a member
+		// of it, are agents by login…
+		"WHEN session_user = 'db_agent' OR EXISTS",
+		// …read from the catalogue, because pg_has_role answers yes for every
+		// superuser and would make dbadmin an agent.
+		"pg_auth_members",
 		// A per-user role is a person.
 		"WHEN session_user NOT IN ('dbadmin','db_client') THEN 'human'",
+		// db_agent has no identity of its own, so its actor is the one the
+		// engine names, like the other shared roles.
+		"NOT IN ('dbadmin','db_client','db_agent')",
 	} {
 		if !strings.Contains(ctx, want) {
 			t.Errorf("_ctx no longer derives the kind from the role: missing %q", want)
@@ -42,6 +51,29 @@ func TestActorKindDerivedFromRole(t *testing.T) {
 	before, _, _ := strings.Cut(ctx, "current_setting('bb.actor_kind'")
 	if !strings.Contains(before, "session_user LIKE 'agent-%'") {
 		t.Error("the session setting is consulted before the role is examined")
+	}
+	// And the agent roles are examined before anything can call the session a
+	// person: otherwise db_agent would fall through to the setting, which its
+	// own SQL can change.
+	kindCase := before[strings.Index(before, "OUT actor_kind"):]
+	if a, h := strings.Index(kindCase, "session_user = 'db_agent'"), strings.Index(kindCase, "THEN 'human'"); a < 0 || h < 0 || a > h {
+		t.Error("a session can be classed as a person before db_agent is recognised")
+	}
+}
+
+// The engine's agent role is created where db_client is, with db_client's
+// access and nothing more.
+func TestAgentClientRoleCreated(t *testing.T) {
+	for _, want := range []string{
+		"CREATE ROLE db_agent LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOBYPASSRLS INHERIT IN ROLE db_client;",
+		"ALTER ROLE db_agent SET role = db_client;",
+	} {
+		if !strings.Contains(Schema, want) {
+			t.Errorf("ledger.sql does not contain %q", want)
+		}
+	}
+	if strings.Index(Schema, "CREATE ROLE db_agent") < strings.Index(Schema, "CREATE ROLE db_client") {
+		t.Error("db_agent is created before db_client, which it is a member of")
 	}
 }
 

@@ -1285,9 +1285,23 @@ paths:
     post:
       tags: [keys]
       summary: Mint a new API key (the secret is returned once).
+      description: >-
+        An account key by default. With kind "agent", a key to give an AI agent: it opens
+        the caller's branches through the Gateway as an agent, so its changes are recorded
+        as an agent's and the agent guardrails apply, and it is refused by this API (it is
+        accepted by the Agent API).
       requestBody:
-        content: { application/json: { schema: { type: object, properties: { name: { type: string } } } } }
-      responses: { "201": { description: "Created; the plaintext key is shown once." }, "401": { $ref: "#/components/responses/Unauthorized" } }
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                kind: { type: string, enum: ["", agent], description: "Empty for an account key; agent for an agent key." }
+      responses:
+        "201": { description: "Created; the plaintext key is shown once." }
+        "400": { description: "An unknown kind." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/keys/{id}:
     delete:

@@ -555,6 +555,12 @@ var appRoleSynced sync.Map
 // reports as "password authentication failed", not as a missing role.
 func forgetBranchRoles(name string) {
 	appRoleSynced.Delete(name)
+	agentRolesReady.Range(func(k, _ any) bool {
+		if s, ok := k.(string); ok && strings.HasPrefix(s, name+"\x00") {
+			agentRolesReady.Delete(k)
+		}
+		return true
+	})
 	prefix := name + "\x00"
 	ensuredRoles.Range(func(k, _ any) bool {
 		if s, ok := k.(string); ok && strings.HasPrefix(s, prefix) {

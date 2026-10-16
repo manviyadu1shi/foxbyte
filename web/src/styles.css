@@ -831,6 +831,9 @@ th.expand-col, td.expand-col { width: 34px; padding-left: 8px; padding-right: 0;
   background: none; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); cursor: pointer; text-align: center; }
 .obj-show-system:hover { color: var(--accent); border-color: var(--accent); }
 .obj-error { padding: 10px 14px; font-size: 12.5px; color: color-mix(in srgb, var(--red) 78%, var(--text)); }
+/* API keys: "for an AI agent" beside the name field. */
+.key-agent-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; user-select: none; white-space: nowrap; }
+.key-agent-toggle input { width: auto; min-width: 0; }
 .override-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; user-select: none; }
 .override-toggle.on { color: var(--red); font-weight: 600; }
 .override-toggle input:disabled + * { opacity: .6; }

@@ -251,7 +251,11 @@ func nonce() (string, error) {
 // its session, task and parent as database defaults (branch.sessionDefaultsSQL),
 // and a session set here would override the database's, so the agent's changes
 // would no longer carry the session it was created with.
-func ledgerOptions(existing, actor, branch string, ownSession bool) string {
+//
+// agent marks an agent key's session (auth.KindAgent). Its role already makes it
+// an agent to the Blackbox; this keeps the injected label in step, so nothing
+// that reads the setting says otherwise.
+func ledgerOptions(existing, actor, branch string, ownSession, agent bool) string {
 	parts := []string{}
 	if existing != "" {
 		parts = append(parts, existing)
@@ -266,7 +270,7 @@ func ledgerOptions(existing, actor, branch string, ownSession bool) string {
 	// DDL is recorded as agent activity rather than hardcoded "human". (Agent
 	// branches are created by the Agent Branch API and named "agent-<id>".)
 	kind := "human"
-	if strings.HasPrefix(branch, "agent-") {
+	if strings.HasPrefix(branch, "agent-") || agent {
 		kind = "agent"
 	}
 	add("bb.actor_kind", kind)

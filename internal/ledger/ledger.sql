@@ -136,8 +136,16 @@ $$;
 -- could `SET bb.actor_kind = 'human'` and have its changes recorded as a
 -- person's — an agent could hide as one, which is exactly what this record
 -- exists to prevent. An agent's own role is always 'agent' and a per-user role
--- is always 'human'. Only the engine's own shared roles (the console, MCP,
--- imports), which have no identity of their own, still take the injected value.
+-- is always 'human'.
+--
+-- The engine's agent sessions are agents by login, too. MCP's SQL tool and the
+-- provenance-recorded agent calls used to log in as the shared db_client and
+-- say "agent" in a setting, so an agent could `SET bb.actor_kind = 'human'` in
+-- its own SQL and step out of the agent-only guardrails. They log in as
+-- db_agent instead, and an agent key's per-account role ("agent:<email>") is a
+-- member of db_agent: both are agents whatever the session says. Only the
+-- remaining shared roles (dbadmin, db_client: the console, imports), which have
+-- no identity of their own, still take the injected kind.
 --
 -- tool and session stay client-declared, and are labelled that way wherever
 -- they are shown: application_name is a string any client chooses, and an
@@ -146,7 +154,7 @@ $$;
 CREATE OR REPLACE FUNCTION bb._ctx(
   OUT actor text, OUT actor_kind text, OUT tool text, OUT session text, OUT branch text
 ) LANGUAGE sql STABLE AS $$
-  SELECT CASE WHEN session_user NOT IN ('dbadmin','db_client')
+  SELECT CASE WHEN session_user NOT IN ('dbadmin','db_client','db_agent')
               THEN session_user
               ELSE current_setting('bb.actor', true) END,
          CASE
@@ -154,6 +162,13 @@ CREATE OR REPLACE FUNCTION bb._ctx(
            -- for an email address, so one containing '@' is a person even if
            -- the address itself begins with "agent-".
            WHEN session_user LIKE 'agent-%' AND position('@' in session_user) = 0 THEN 'agent'
+           -- The engine's agent role, and an agent key's role, which is a
+           -- member of it. Direct membership, read from the catalogue:
+           -- pg_has_role would also answer yes for every superuser.
+           WHEN session_user = 'db_agent' OR EXISTS (
+                  SELECT 1 FROM pg_auth_members m
+                  JOIN pg_roles g ON g.oid = m.roleid AND g.rolname = 'db_agent'
+                  JOIN pg_roles u ON u.oid = m.member AND u.rolname = session_user) THEN 'agent'
            WHEN session_user NOT IN ('dbadmin','db_client') THEN 'human'
            WHEN current_setting('bb.actor_kind', true) = 'agent' THEN 'agent'
            ELSE 'human'
@@ -653,6 +668,18 @@ BEGIN
     CREATE ROLE db_client LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOBYPASSRLS;
   END IF;
 END $$;
+
+-- The engine's agent role: db_client's access exactly (it is a member, and acts
+-- as db_client, so what it creates belongs to db_client like everything else),
+-- but an agent by login, which bb._ctx reads from session_user — a session
+-- cannot change that. Its password is set by the engine (branch.syncAppRole).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'db_agent') THEN
+    CREATE ROLE db_agent LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOBYPASSRLS INHERIT IN ROLE db_client;
+  END IF;
+END $$;
+ALTER ROLE db_agent SET role = db_client;
 
 -- Full access to application data (it owns what it creates; these cover what the
 -- superuser created, e.g. imported tables, now and in future).

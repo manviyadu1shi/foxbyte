@@ -370,7 +370,8 @@
       <li class="lim">No self-service reset by email — it needs the machine, which suits a local install and not a hosted one</li></ul></td><td class="tb">Unit; VM §1; VM §1d</td></tr>
     <tr data-id="G3" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">G3</td><td><b>API keys</b><ul class="subs">
       <li class="ok">Create (shown once), list, revoke</li><li class="ok">Bearer / X-API-Key and gateway password</li>
-      <li class="ok">Revoking an id that is not there is refused (404), not reported as revoked</li></ul></td><td class="tb">Unit; VM §1</td></tr>
+      <li class="ok">Revoking an id that is not there is refused (404), not reported as revoked</li>
+      <li class="ok">Agent keys (<code>--agent</code>, "for an AI agent"): the owner's branches, as an agent; refused by the control plane; never an admin</li></ul></td><td class="tb">Unit (<code>TestAgentKey</code>); VM §1; v2 §1c</td></tr>
     <tr data-id="G4" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">G4</td><td><b>Web sessions &amp; signup control</b><ul class="subs">
       <li class="ok">httpOnly session cookie</li><li class="ok">Sign-up closed by default (<code>FOX_SIGNUP=open</code>)</li><li class="ok">Failed sign-ins throttled</li></ul></td><td class="tb">Unit (<code>TestSessions</code>)</td></tr>
     <tr data-id="G5" data-st="part"><td class="c"><i class="ck part"></i></td><td class="id">G5</td><td><b>OAuth (GitHub / Google)</b><ul class="subs">
@@ -388,13 +389,15 @@
     <tr data-id="H1" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">H1</td><td><b>DDL recording</b><ul class="subs">
       <li class="ok">Who, tool, branch, statement, status, risk</li><li class="ok">Inherited by every branch</li>
       <li class="ok">A restart records nothing: the install script's own statements are not captured</li>
-      <li class="lim">Role / database changes, some dropped object types</li><li class="ok">Agents' UPDATE and DELETE recorded; TRUNCATE by anyone</li><li class="ok">An agent's UPDATE or DELETE with no WHERE is refused, and the attempt recorded — a superuser or db_admin can let one through</li><li class="ok">Triggers on every table, protected from drop/disable/rename</li></ul></td><td class="tb">VM §8; v2 §9; v2 §10</td></tr>
+      <li class="lim">Role / database changes, some dropped object types</li><li class="ok">Agents' UPDATE and DELETE recorded; TRUNCATE by anyone</li><li class="ok">An agent's UPDATE or DELETE with no WHERE is refused, and the attempt recorded — a superuser or db_admin can let one through</li><li class="ok">Triggers on every table, protected from drop/disable/rename and from being made replica-only</li></ul></td><td class="tb">VM §8; v2 §9; v2 §10</td></tr>
     <tr data-id="H2" data-st="part"><td class="c"><i class="ck part"></i></td><td class="id">H2</td><td><b>Hash chain, append-only &amp; verify</b><ul class="subs">
       <li class="ok">Rows can't be edited or deleted normally</li><li class="ok"><code>fox ledger verify</code></li>
       <li class="part">Superuser rewrite caught only via anchors (H10–H12)</li><li class="ok"><code>bb.policy</code> changes recorded (append-only, not chained)</li></ul></td><td class="tb">VM §8; v2 §0, §6b</td></tr>
     <tr data-id="H3" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">H3</td><td><b>Attribution</b><ul class="subs">
       <li class="ok">Humans via their login role</li><li class="ok">Agents via their own <code>agent-&lt;id&gt;</code> role</li>
       <li class="ok">Kind derived from the role, so neither can pose as the other</li>
+      <li class="ok">The engine's agent sessions (MCP) log in as <code>db_agent</code>, and agent keys as <code>agent:&lt;email&gt;</code>: agents by login</li>
+      <li class="lim">An engine agent session's actor name is still injected (signed identity is the expert review plan's F1)</li>
       <li class="ok">Tool and session are client-declared by design, and labelled so</li></ul></td><td class="tb">Unit; VM §8; v2 §1c</td></tr>
     <tr data-id="H4" data-st="done"><td class="c"><i class="ck done"></i></td><td class="id">H4</td><td><b>Destructive-DDL guardrail</b><ul class="subs">
       <li class="ok">DROP TABLE / DROP SCHEMA refused, attempt recorded</li><li class="ok">Override only superusers / <code>db_admin</code>, use recorded</li>
@@ -555,7 +558,7 @@
       <li class="ok">"Branch from before this change" on the row itself (<code>main</code>; explained elsewhere)</li>
       <li class="ok">Covered by the console's Playwright tests</li></ul></td><td class="tb">v2 §5b; browser; VM ui</td></tr>
     <tr data-id="L6" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">L6</td><td><b>API keys page</b><ul class="subs">
-      <li class="ok">Create, copy, list, revoke</li><li class="ok">A new key is shown inside its connection string (E3's next step)</li><li class="ok">Covered by the console's Playwright tests</li></ul></td><td class="tb">Manual; browser review 21 Sep; VM ui</td></tr>
+      <li class="ok">Create, copy, list, revoke</li><li class="ok">A new key is shown inside its connection string (E3's next step)</li><li class="ok">"For an AI agent" mints an agent key; a Kind column</li><li class="ok">Covered by the console's Playwright tests</li></ul></td><td class="tb">Manual; browser review 21 Sep; VM ui</td></tr>
     <tr data-id="L7" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">L7</td><td><b>Landing, Guide &amp; Docs pages</b><ul class="subs">
       <li class="ok">Landing, developer guide, reference</li><li class="ok">Refreshed against the code (https, sslmode, MCP, Blackbox, import routes)</li></ul></td><td class="tb">Type-check + build</td></tr>
     <tr data-id="L8" data-st="man"><td class="c"><i class="ck man"></i></td><td class="id">L8</td><td><b>Blackbox integrity page</b><ul class="subs">

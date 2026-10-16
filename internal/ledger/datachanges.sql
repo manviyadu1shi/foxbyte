@@ -186,7 +186,11 @@ LANGUAGE sql STABLE AS $$
      AND bb._may_override();
 $$;
 
--- ddl_command_end: attach to new tables; refuse a disabled or renamed trigger.
+-- ddl_command_end: attach to new tables; refuse a disabled, replica-only or
+-- renamed trigger. Replica-only (ALTER TABLE … ENABLE REPLICA TRIGGER) is
+-- disabling by another name: such a trigger fires only while
+-- session_replication_role is replica, which an ordinary session never is, and
+-- the table's owner may set it without being a superuser.
 CREATE OR REPLACE FUNCTION bb.data_protect_end() RETURNS event_trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, bb AS $$
 DECLARE r record; bad text;
@@ -201,17 +205,19 @@ BEGIN
         PERFORM bb._attach_data_triggers(r.objid::regclass);
       END IF;
     END IF;
-    -- ALTER TABLE … DISABLE TRIGGER, or ALTER TRIGGER … RENAME, on one of ours.
+    -- ALTER TABLE … DISABLE TRIGGER or ENABLE REPLICA TRIGGER, or ALTER
+    -- TRIGGER … RENAME, on one of ours. ENABLE ALWAYS stays allowed: it fires
+    -- in more sessions, not fewer.
     IF r.command_tag IN ('ALTER TABLE','ALTER TRIGGER') AND NOT bb._override_in_force() THEN
       SELECT string_agg(t.tgname || ' on ' || t.tgrelid::regclass::text, ', ') INTO bad
       FROM pg_trigger t
       WHERE t.tgfoid IN ('bb.guard_truncate()'::regprocedure, 'bb.record_dml()'::regprocedure,
                          'bb.guard_dml()'::regprocedure)
-        AND (t.tgenabled = 'D' OR t.tgname NOT IN ('bb_guard_truncate','bb_record_dml','bb_guard_dml'))
+        AND (t.tgenabled IN ('D','R') OR t.tgname NOT IN ('bb_guard_truncate','bb_record_dml','bb_guard_dml'))
         AND t.tgrelid = CASE WHEN r.object_type = 'table' THEN r.objid
                              ELSE (SELECT tgrelid FROM pg_trigger WHERE oid = r.objid) END;
       IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'guardrail: the Blackbox''s data-change triggers cannot be disabled or renamed (%)', bad
+        RAISE EXCEPTION 'guardrail: the Blackbox''s data-change triggers cannot be disabled or renamed, nor made replica-only (%)', bad
           USING ERRCODE = 'insufficient_privilege',
                 HINT = 'Only superusers and members of db_admin may, with bb.allow_destructive=on.';
       END IF;

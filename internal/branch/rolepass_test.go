@@ -18,6 +18,8 @@ func TestRolePasswordsAreDistinct(t *testing.T) {
 		"alice@x.com":       UserRolePassword("alice@x.com"),
 		"bob@x.com":         UserRolePassword("bob@x.com"),
 		"agent-a (agent)":   AgentRolePassword("agent-a"),
+		"db_agent":          AgentClientRolePassword(),
+		"alice's agent key": AgentKeyRolePassword("alice@x.com"),
 		"alice@x.com again": UserRolePassword("alice@x.com"),
 	} {
 		if what == "alice@x.com again" {

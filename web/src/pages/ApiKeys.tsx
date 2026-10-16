@@ -11,7 +11,8 @@ export default function ApiKeys() {
   const confirm = useConfirm()
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [name, setName] = useState('')
-  const [fresh, setFresh] = useState<string | null>(null)
+  const [forAgent, setForAgent] = useState(false)
+  const [fresh, setFresh] = useState<{ key: string; agent: boolean } | null>(null)
   const [err, setErr] = useState('')
 
   const refresh = () => listKeys().then(r => setKeys(r.keys || [])).catch(e => setErr((e as Error).message))
@@ -22,9 +23,10 @@ export default function ApiKeys() {
     if (!n) return
     setErr('')
     try {
-      const r = await createKey(n)
-      setFresh(r.key)
+      const r = await createKey(n, forAgent ? 'agent' : '')
+      setFresh({ key: r.key, agent: forAgent })
       setName('')
+      setForAgent(false)
       await refresh()
     } catch (e) { setErr((e as Error).message) }
   }
@@ -48,11 +50,17 @@ export default function ApiKeys() {
           <p className="sub">
             A key is the password for a connection: send it as a <code>Bearer</code> token to the
             API and agent endpoints, or as the password when you connect through the gateway.
+            Giving one to an AI agent? Make it an <b>agent key</b>: it opens your branches through
+            the gateway as an agent, so its changes are recorded as an agent's and the agent
+            guardrails apply. It cannot sign in here or use the control-plane API.
           </p>
         </div>
         <div className="tools">
           <input placeholder="key name (e.g. ci, laptop)" value={name} onChange={e => setName(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') create() }} style={{ minWidth: 220 }} />
+          <label className="key-agent-toggle" title="Recorded as an agent, with the agent guardrails; refused by the console and the control-plane API">
+            <input type="checkbox" checked={forAgent} onChange={e => setForAgent(e.target.checked)} /> for an AI agent
+          </label>
           <button className="primary" onClick={create} disabled={!name.trim()}>Create key</button>
         </div>
       </div>
@@ -62,26 +70,27 @@ export default function ApiKeys() {
           the moment someone actually needs it, right after signing in. */}
       {fresh && (
         <div className="panel key-fresh">
-          <b>New key — copy it now, it won’t be shown again.</b>
-          <pre><code>{fresh}</code>
-            <button className="copy" onClick={() => navigator.clipboard?.writeText(fresh)}>copy</button>
+          <b>New {fresh.agent ? 'agent key' : 'key'} — copy it now, it won’t be shown again.</b>
+          <pre><code>{fresh.key}</code>
+            <button className="copy" onClick={() => navigator.clipboard?.writeText(fresh.key)}>copy</button>
           </pre>
-          <p className="muted">Connect to the <code>main</code> branch with it:</p>
-          <pre><code>{dsn(fresh)}</code>
-            <button className="copy" onClick={() => navigator.clipboard?.writeText(dsn(fresh))}>copy</button>
+          <p className="muted">Connect to the <code>main</code> branch with it{fresh.agent ? ', as an agent' : ''}:</p>
+          <pre><code>{dsn(fresh.key)}</code>
+            <button className="copy" onClick={() => navigator.clipboard?.writeText(dsn(fresh.key))}>copy</button>
           </pre>
         </div>
       )}
 
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th /></tr></thead>
+          <thead><tr><th>Name</th><th>Kind</th><th>Prefix</th><th>Created</th><th /></tr></thead>
           <tbody>
             {keys.length === 0
-              ? <tr><td colSpan={4} className="muted">No keys yet — name one above and create it.</td></tr>
+              ? <tr><td colSpan={5} className="muted">No keys yet — name one above and create it.</td></tr>
               : keys.map(k => (
                 <tr key={k.id}>
                   <td><b>{k.name}</b></td>
+                  <td className="muted">{keyKind(k)}</td>
                   <td className="mono muted">{k.prefix}…</td>
                   <td className="muted">{new Date(k.created * 1000).toLocaleString()}</td>
                   <td><div className="actions"><button className="ghost danger" onClick={() => revoke(k)}>Revoke</button></div></td>
@@ -94,6 +103,15 @@ export default function ApiKeys() {
       <PasswordPanel />
     </div>
   )
+}
+
+// What a key can do, in a word: an agent key and a realtime key say so; a key
+// scoped to one branch names it.
+export function keyKind(k: ApiKey): string {
+  if (k.kind === 'agent') return 'agent'
+  if (k.kind === 'realtime') return `realtime · ${k.scope ?? ''}`
+  if (k.scope) return `branch · ${k.scope}`
+  return 'account'
 }
 
 // Changing the password signs out every other session of the account: whoever

@@ -461,12 +461,18 @@ configuration that produced them, and what the drill did not test.
 
 ```bash
 fox apikey create <email> [name]   # mint an API key (shown once)
+fox apikey create <email> [name] --agent   # a key to give an AI agent
 fox apikey list <email>
 fox apikey revoke <email> <id>
 fox user create <email>            # create an account (prompts for a password)
 fox user passwd <email>            # forgotten password: set a new one
 fox user list | delete <email>     # accounts: list, delete
 ```
+
+**Giving a key to an AI agent?** Mint an agent key (`--agent`, or "for an AI agent"
+on the console's Keys page). It opens your branches through the Gateway, but as an
+agent: its changes are recorded as an agent's and the agent guardrails apply to it.
+It never holds your admin grant, and the console and the control-plane API refuse it.
 
 **Forgotten a password?** It cannot be recovered — only a hash of it is stored, so
 nobody can read it back, not even an admin. Set a new one from the machine FoxByte

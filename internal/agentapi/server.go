@@ -149,7 +149,9 @@ func Serve(addr string) error {
 		writeJSON(w, http.StatusOK, map[string]string{"agent": id, "status": "deleted"})
 	})
 
-	protected := store.Authn(checkAgentID(agents))
+	// An agent key is accepted here and nowhere else on HTTP: every branch this
+	// API makes is an agent's, so an agent may use it with the key it was given.
+	protected := store.AuthnAgents(checkAgentID(agents))
 	mux.Handle("/agents", protected)
 	mux.Handle("/agents/", protected)
 

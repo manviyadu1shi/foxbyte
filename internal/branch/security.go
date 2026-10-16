@@ -84,8 +84,13 @@ func ClientQueryTextAs(branchName, sql, tool, actor string) (string, error) {
 		// (sessionDefaultsSQL), so injecting here would override them.
 		args = append(args, "-e", fmt.Sprintf("PGOPTIONS=-c bb.actor=%s -c bb.actor_kind=agent", actor))
 	}
+	// As db_agent where the branch's Blackbox knows it, so the session is an
+	// agent by login and the SQL it runs cannot say otherwise (agentrole.go).
+	// The injected kind above stays for a branch that does not, which logs in
+	// as db_client exactly as before.
+	role, _ := agentLoginRole(branchName)
 	args = append(args, container(branchName),
-		"psql", "-U", "db_client", "-d", pgDatabase, "-P", "pager=off", "-c", sql)
+		"psql", "-U", role, "-d", pgDatabase, "-P", "pager=off", "-c", sql)
 	out, err := captureCombined(args[0], args[1:]...)
 	if err != nil {
 		return out, fmt.Errorf("%s", out)
