@@ -3,6 +3,7 @@
 package branch
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -104,14 +105,43 @@ func anchorBase() string {
 }
 
 // MirrorAnchors copies every anchor not yet copied — each branch's and the
-// security log's — to <target>/anchors/, and marks each one copied. With an
-// Object Lock bucket nothing copied can then be changed or removed, even by
-// whoever controls this machine. Nothing happens for the local target.
+// security log's — off this machine, and marks each one copied. Two places, and
+// either may be absent:
+//
+//   - the backup target's bucket, under <target>/anchors/, as it always has;
+//     protected only by whatever retention that bucket has by default;
+//   - the anchor target (anchortarget.go), each anchor locked in COMPLIANCE mode
+//     for the target's retention, so that nobody can delete or rewrite it.
+//
+// It returns how many copies it made. A failure at one place does not stop the
+// other.
 func MirrorAnchors() (int, error) {
-	t := target()
-	if !t.Remote() {
-		return 0, nil
+	var n int
+	var errs []error
+	if t := target(); t.Remote() {
+		c, err := mirrorAnchorsTo(t, mcEnvFile(), mirroredSuffix, "")
+		n += c
+		if err != nil {
+			errs = append(errs, fmt.Errorf("backup target: %w", err))
+		}
 	}
+	at, ok, err := CurrentAnchorTarget()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("anchor target: %w", err))
+	} else if ok {
+		c, err := mirrorAnchorsTo(at.Target, envFile("mc-anchor.env", mcEnvContent(at.Target)), lockedSuffix, retentionFlags(at.RetentionDays))
+		n += c
+		if err != nil {
+			errs = append(errs, fmt.Errorf("anchor target: %w", err))
+		}
+	}
+	return n, errors.Join(errs...)
+}
+
+// mirrorAnchorsTo copies the anchors that have no <suffix> marker to t's
+// <root>/anchors/<dir>/, passing cpFlags to mc cp, and writes the marker for
+// each copied.
+func mirrorAnchorsTo(t Target, env, suffix, cpFlags string) (int, error) {
 	base := anchorBase()
 	dirs, err := os.ReadDir(base)
 	if os.IsNotExist(err) {
@@ -133,7 +163,7 @@ func MirrorAnchors() (int, error) {
 			if !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(dir, name+mirroredSuffix)); err == nil {
+			if _, err := os.Stat(filepath.Join(dir, name+suffix)); err == nil {
 				continue
 			}
 			pending = append(pending, name)
@@ -144,14 +174,14 @@ func MirrorAnchors() (int, error) {
 		dest := strings.TrimPrefix(t.Root(), "s3://") + "/anchors/" + d.Name() + "/"
 		var cmds []string
 		for _, name := range pending {
-			cmds = append(cmds, fmt.Sprintf("mc cp --quiet /anchors/%s t/%s%s", name, dest, name))
+			cmds = append(cmds, strings.Join(strings.Fields(fmt.Sprintf("mc cp --quiet %s /anchors/%s t/%s%s", cpFlags, name, dest, name)), " "))
 		}
-		if out, err := captureCombined("docker", "run", "--rm", "--network", network, "--env-file", mcEnvFile(),
+		if out, err := captureCombined("docker", "run", "--rm", "--network", network, "--env-file", env,
 			"-v", dir+":/anchors:ro", "--entrypoint", "sh", mcImage(), "-c", "set -e; "+strings.Join(cmds, "; ")); err != nil {
 			return n, fmt.Errorf("%s: %s", d.Name(), strings.TrimSpace(out))
 		}
 		for _, name := range pending {
-			_ = os.WriteFile(filepath.Join(dir, name+mirroredSuffix), nil, 0o444)
+			_ = os.WriteFile(filepath.Join(dir, name+suffix), nil, 0o444)
 			n++
 		}
 	}

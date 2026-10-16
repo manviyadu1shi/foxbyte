@@ -23,6 +23,7 @@ import (
 //	fox ledger diff <a> <b>          schema changes on each branch since they split (--json)
 //	fox ledger branch-before <id>    a new branch of main as it was just before entry <id>
 //	fox ledger anchor-key            the public key anchors are signed with
+//	fox ledger anchor-target         where anchors are kept under Object Lock
 //
 // It returns false for anything else, leaving the existing subcommands untouched.
 func ledgerV2Cmd(args []string) bool {
@@ -51,6 +52,8 @@ func ledgerV2Cmd(args []string) bool {
 		if a.KeyID != "" {
 			fmt.Printf("  signed by key %s\n", a.KeyID)
 		}
+	case "anchor-target":
+		anchorTargetCmd(args[1:])
 	case "anchor-key":
 		// The public key a verifier needs to prove anchors are genuine. Give it
 		// to whoever audits; keep the private key where the databases cannot

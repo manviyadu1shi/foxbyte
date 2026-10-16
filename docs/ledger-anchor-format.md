@@ -20,11 +20,23 @@ file **outside** the database. Changing, removing or wiping anchored rows makes
 the rows stop matching the anchor, however the chain was rewritten.
 
 Anchors are only as safe as where they are kept. By default FoxByte writes them
-read-only (mode `0444`) to `~/.fox/anchors/<branch>/`. Point
-`FOX_ANCHOR_DIR` at storage the database's operators cannot rewrite (a
-write-once mount, a copy synced off the host) for stronger guarantees, and set
-`FOX_ANCHOR_IMMUTABLE=1` to also mark files immutable (`chattr +i`) where
-the filesystem supports it.
+read-only (mode `0444`) to `~/.fox/anchors/<branch>/`, on the machine its
+administrator controls, so against that person the default proves nothing.
+Keep them somewhere that person cannot rewrite:
+
+- **An anchor target** (`fox blackbox anchor-target set s3://bucket …`): a
+  bucket of its own, created with Object Lock, ideally in an account the
+  database administrators do not control. Every anchor is copied there under
+  `anchors/<branch>/` and locked in **COMPLIANCE** mode for the target's
+  retention (365 days unless `--retention-days` says otherwise). Until then
+  nobody can delete or overwrite it, the bucket's owner included. GOVERNANCE
+  mode is not enough: anyone allowed to bypass governance retention can delete.
+  A bucket without Object Lock is refused. `fox check` reports the target and
+  any anchor waiting more than a day to be copied.
+- **The backup target**, if one is set, also receives a copy, under its
+  default retention, with the backup keys.
+- `FOX_ANCHOR_DIR` can point at a write-once mount, and `FOX_ANCHOR_IMMUTABLE=1`
+  marks files immutable (`chattr +i`) where the filesystem supports it.
 
 Rows written after the most recent checkpoint are protected only by the hash
 chain until the next checkpoint (default: every 10 minutes, or every 500 new

@@ -81,6 +81,7 @@ func checks() []check {
 		one("API is closed", checkAPIClosed),
 		one("blackbox", checkBlackbox),
 		one("blackbox anchors", checkAnchors),
+		one("anchor target", checkAnchorTarget),
 		one("change feed", checkRealtime),
 		one("durability", checkDurability),
 		one("replication", checkReplicationAccess),
@@ -626,6 +627,42 @@ func durabilityLine(ha branch.HAState, quorumMet func() bool) checkLine {
 			"up to 60s of writes")
 	}
 	return ok("durability", "single copy: commits never wait, and the WAL archive is the only second copy")
+}
+
+// Where anchors are kept, and whether the administrator of this machine could
+// rewrite them (the expert review plan, G3). Read from the saved target and the
+// marker files only: like the backup line, no container and no network.
+func checkAnchorTarget() checkLine {
+	a, ok, err := branch.CurrentAnchorTarget()
+	bt, _ := branch.CurrentTarget()
+	return anchorTargetLine(a, ok, err, bt, branch.CountAnchorCopies(branch.LockedSuffix))
+}
+
+// anchorTargetLine is the judgement, apart from reading the files.
+func anchorTargetLine(a branch.AnchorTarget, set bool, err error, backup branch.Target, c branch.AnchorCopies) checkLine {
+	fix := fmt.Sprintf("%s blackbox anchor-target set s3://bucket --endpoint <https-url> --access-key <key>", brand.CLI)
+	if err != nil {
+		return fail("anchor target", err.Error(), fmt.Sprintf("%s blackbox anchor-target show", brand.CLI))
+	}
+	if !set {
+		where := "on this machine only"
+		if backup.Remote() {
+			where = "on this machine, with copies in the backup bucket under its default retention"
+		}
+		return warn("anchor target", "none: anchors are kept "+where+
+			", so whoever administers this machine or holds the backup keys could rewrite them", fix)
+	}
+	detail := fmt.Sprintf("%s, each anchor locked in COMPLIANCE mode for %d days", a.Root(), a.RetentionDays)
+	// An anchor waiting more than a day means the copying has stopped, and a
+	// gap is exactly what someone rewriting history would want.
+	if c.Waiting > 0 && c.OldestWaiting > 24*time.Hour {
+		return warn("anchor target", fmt.Sprintf("%s; %d anchor(s) not copied there, the oldest for %s", detail, c.Waiting, c.OldestWaiting.Round(time.Hour)),
+			fmt.Sprintf("%s blackbox anchor-target show", brand.CLI))
+	}
+	if c.Waiting > 0 {
+		detail += fmt.Sprintf("; %d waiting to be copied", c.Waiting)
+	}
+	return ok("anchor target", detail)
 }
 
 func checkBackupTarget() checkLine { return backupTargetLine(branch.CurrentTarget()) }
