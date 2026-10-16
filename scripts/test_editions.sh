@@ -17,6 +17,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# The binaries built here are run, and on macOS and Windows fox first asks the
+# local engine which edition it is and replaces itself to match
+# (host.SyncLauncherEdition). What this checks is the binaries as built, so it
+# must not depend on whatever engine the developer's machine is running.
+export FOX_NO_EDITION_SYNC=1
+
 PASS=0
 FAIL=0
 ok()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
