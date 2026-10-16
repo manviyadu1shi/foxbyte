@@ -205,6 +205,8 @@ Auth (admin):
   admin grant <email> [--branch <name>]   Let a user override the destructive-DDL guardrail
   admin revoke <email> [--branch <name>]  Remove that permission
   admin list [--branch <name>]            Show who may override (default: main + running branches)
+  guardrail limit [--table <t>] [--branch <name>] [<rows>|none]
+                                          Show or set how many rows one agent UPDATE/DELETE may change in a table
 
   license [show]       The paid-edition licence, and this machine's fingerprint
   license activate <file|->   Install one  ·  license rebind  ·  license remove
@@ -454,6 +456,8 @@ func main() {
 		firstRunNotice()
 	case "apikey":
 		apikeyCmd(os.Args[2:])
+	case "guardrail":
+		guardrailCmd(os.Args[2:])
 	case "admin":
 		adminCmd(os.Args[2:])
 	case "policy":

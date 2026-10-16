@@ -1322,11 +1322,63 @@ assert_eq "…while making it fire in every session is allowed" \
 assert_eq "…and both are still there, enabled" \
   "$(pg pg-agent-v2dc "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.ad'::regclass AND tgname IN ('bb_guard_truncate','bb_record_dml') AND tgenabled <> 'D'")" "2"
 assert_eq "a table made by CREATE TABLE AS gets them too" \
-  "$(apsql 'CREATE TABLE ad2 AS SELECT * FROM ad' >/dev/null; pg pg-agent-v2dc "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.ad2'::regclass AND tgname LIKE 'bb_%'")" "3"
+  "$(apsql 'CREATE TABLE ad2 AS SELECT * FROM ad' >/dev/null; pg pg-agent-v2dc "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.ad2'::regclass AND tgname LIKE 'bb_%'")" "4"
 assert_eq "…including the one that refuses an unqualified change" \
   "$(pg pg-agent-v2dc "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.ad2'::regclass AND tgname = 'bb_guard_dml'")" "1"
 curl -sk -o /dev/null -H "$AUTH" -X DELETE "$AGENTS/agents/v2dc/branch"
 $S branch delete v2dc >/dev/null 2>&1
+
+echo "### 10b. policy by impact: agents' UPDATE and DELETE are limited by rows changed (expert review plan G2)"
+# "No WHERE" was read from the text, so WHERE 1=1 emptied a table and passed.
+# What counts now is how many rows one statement changes in a table.
+curl -sk -o /dev/null -H "$AUTH" -X DELETE "$AGENTS/agents/v2ig/branch"
+IDSN="$(curl -sk -H "$AUTH" -X POST "$AGENTS/agents/v2ig/branch" | jget dsn)"
+ipsql() { psql "$IDSN" -tAc "$1" 2>&1; }
+ipsql "CREATE TABLE ig(id int primary key, x int); INSERT INTO ig SELECT g, 0 FROM generate_series(1,300) g" >/dev/null
+assert_eq "every table gets the impact guard" \
+  "$(pg pg-agent-v2ig "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.ig'::regclass AND tgname = 'bb_guard_impact'")" "1"
+I0="$(pg pg-agent-v2ig 'SELECT max(id) FROM bb.schema_ledger')"
+assert_eq "an agent's DELETE ... WHERE 1=1 is refused, and the rows are still there" \
+  "$(ipsql 'DELETE FROM ig WHERE 1=1' | grep -c 'DELETE of more than 100 row(s) of public.ig is blocked by policy')|$(pg pg-agent-v2ig 'SELECT count(*) FROM ig')" "1|300"
+assert_eq "…the attempt is recorded, as BLOCKED by impact" \
+  "$(pg pg-agent-v2ig "SELECT string_agg(command_tag||'|'||status||'|'||risk||'|'||object_identity, ',') FROM bb.schema_ledger WHERE id > $I0")" \
+  "DELETE|BLOCKED|impact|public.ig"
+assert_eq "an agent's UPDATE of exactly 100 rows runs" \
+  "$(ipsql 'UPDATE ig SET x = 1 WHERE id <= 100' | grep -c blocked)|$(pg pg-agent-v2ig 'SELECT count(*) FROM ig WHERE x = 1')" "0|100"
+assert_eq "…of 101 is refused" \
+  "$(ipsql 'UPDATE ig SET x = 2 WHERE id <= 101' | grep -c 'is blocked by policy')|$(pg pg-agent-v2ig 'SELECT count(*) FROM ig WHERE x = 2')" "1|0"
+assert_eq "…and claiming to be a person changes nothing" \
+  "$(ipsql "SET bb.actor_kind = human; UPDATE ig SET x = 2 WHERE id <= 101" | grep -c 'is blocked by policy')" "1"
+assert_eq "…nor does resetting a setting from the statement's own WHERE" \
+  "$(ipsql "DELETE FROM ig WHERE set_config('bb.actor_kind', 'human', true) IS NOT NULL" | grep -c 'is blocked by policy')|$(pg pg-agent-v2ig 'SELECT count(*) FROM ig')" "1|300"
+assert_eq "the agent cannot raise its own limit" \
+  "$(ipsql "UPDATE bb.dml_limits SET max_rows = 1000000" | grep -c 'permission denied')" "1"
+assert_eq "…nor make the guard replica-only, nor drop it" \
+  "$(ipsql 'ALTER TABLE ig ENABLE REPLICA TRIGGER bb_guard_impact' | grep -c 'nor made replica-only')|$(ipsql 'DROP TRIGGER bb_guard_impact ON ig' | grep -c 'cannot be dropped')" "1|1"
+assert_eq "fox guardrail limit shows the default" \
+  "$($S guardrail limit --branch agent-v2ig 2>&1 | grep 'default' | grep -c '100 rows')" "1"
+assert_eq "…and sets a table's own limit" \
+  "$($S guardrail limit --branch agent-v2ig --table ig 500 2>&1 | grep -c 'public.ig is 500 rows')" "1"
+assert_eq "…which lets a 300-row agent UPDATE through" \
+  "$(ipsql 'UPDATE ig SET x = 3 WHERE id <= 300' | grep -c blocked)|$(pg pg-agent-v2ig 'SELECT count(*) FROM ig WHERE x = 3')" "0|300"
+assert_eq "…and the change is in the policy history, with who made it" \
+  "$(pg pg-agent-v2ig "SELECT op||'|'||change||'|'||new_action||'|'||(changed_by LIKE 'cli:%') FROM bb.policy_history ORDER BY id DESC LIMIT 1")" \
+  "AGENT DML ROWS public.ig|insert|500|true"
+$S guardrail limit --branch agent-v2ig --table ig none >/dev/null 2>&1
+assert_eq "removing it falls back to the default" \
+  "$(ipsql 'UPDATE ig SET x = 4 WHERE id <= 300' | grep -c 'is blocked by policy')" "1"
+assert_eq "a table that is not there is refused by name" \
+  "$($S guardrail limit --branch agent-v2ig --table nosuch 10 2>&1 | grep -c 'no such table')" "1"
+assert_eq "an admin's override still lets one through" \
+  "$(pg pg-agent-v2ig 'SET bb.allow_destructive=on; DELETE FROM ig WHERE id > 0' | grep -c blocked)|$(pg pg-agent-v2ig 'SELECT count(*) FROM ig')" "0|0"
+# A person is not limited: a migration legitimately rewrites every row.
+$S branch delete v2igh >/dev/null 2>&1; $S branch create v2igh >/dev/null 2>&1
+$S branch owner v2igh "$USER_EMAIL" >/dev/null 2>&1
+gw "$KEY" v2igh "CREATE TABLE igh(id int); INSERT INTO igh SELECT generate_series(1,300)" >/dev/null
+assert_eq "a person's 300-row DELETE runs" \
+  "$(gw "$KEY" v2igh 'DELETE FROM igh WHERE id > 0' | grep -c blocked)|$(pg pg-v2igh 'SELECT count(*) FROM igh')" "0|0"
+$S branch delete v2igh >/dev/null 2>&1
+curl -sk -o /dev/null -H "$AUTH" -X DELETE "$AGENTS/agents/v2ig/branch"
 
 echo
 echo "==== ${PASS} passed, ${FAIL} failed ===="
