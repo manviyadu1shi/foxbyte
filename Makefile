@@ -109,7 +109,7 @@ test-vm-delete:   ## Delete the test VM and everything in it
 # running them against Standard would test the refusal rather than the feature,
 # and the refusals have tests of their own in scripts/test_editions.sh.
 integration: test-vm      ## Run the full end-to-end integration test in the test VM
-	$(IN_TEST_VM) bash -c 'cd "$(CURDIR)" && scripts/build_test_fox.sh /tmp/fox' && $(IN_TEST_VM) bash "$(CURDIR)/scripts/integration_test.sh"
+	$(IN_TEST_VM) bash -c 'cd "$(CURDIR)" && scripts/build_test_fox.sh /tmp/fox && go build -o /tmp/fox-verify ./cmd/fox-verify' && $(IN_TEST_VM) bash "$(CURDIR)/scripts/integration_test.sh"
 
 integration-v2: test-vm   ## Run the Blackbox 2.0 checks (behaviour-unchanged + new) in the test VM
 	$(IN_TEST_VM) bash -c 'cd "$(CURDIR)" && scripts/build_test_fox.sh /tmp/fox && go build -o /tmp/fox-verify ./cmd/fox-verify' && $(IN_TEST_VM) bash "$(CURDIR)/scripts/integration_ledger_v2.sh"

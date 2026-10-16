@@ -1129,6 +1129,42 @@ N0="$(rmc ls --recursive r/itanchors/anchors/main/ | grep -c '.json')"
 pg pg-main "CREATE TABLE IF NOT EXISTS anchor_target_t(x int)" >/dev/null
 $S blackbox checkpoint main >/dev/null 2>&1
 assert_eq "a new anchor follows them there" "$(rmc ls --recursive r/itanchors/anchors/main/ | grep -c '.json')" "$((N0 + 1))"
+# G3b: an auditor checks the anchors in the bucket, with keys of their own and
+# nothing from this machine but the ledger rows. On a branch of its own: earlier
+# sections rewrite main's history (and its anchors outlive them), and a name
+# used by an earlier run would find that run's anchors. fox-verify runs here,
+# not on the engine's network, so the store is reached at its address.
+VB="itanc$(date +%s)"
+$S branch create "$VB" >/dev/null 2>&1
+$S branch owner "$VB" test@foxbyte.dev >/dev/null 2>&1
+pg "pg-$VB" "CREATE TABLE verified_t(x int)" >/dev/null
+$S blackbox checkpoint "$VB" >/dev/null 2>&1
+RSIP="$(sudo docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$RS")"
+VDSN="postgresql://dbadmin:$KEY@127.0.0.1:6432/$VB?sslmode=require"
+fv() { FOX_VERIFY_S3_SECRET_KEY="$RSK" /tmp/fox-verify --dsn "$VDSN" --anchors-s3 "s3://itanchors/anchors/$VB" \
+  --s3-endpoint "http://$RSIP:9000" --s3-access-key "$RAK" --s3-path-style "$@" 2>&1; }
+$S blackbox anchor-key > /tmp/it-anchor.pub 2>/dev/null
+OUT="$(fv --pubkey /tmp/it-anchor.pub --anchors "$HOME/$BRAND_STATE_DIR/anchors/$VB")"; RC=$?
+assert_eq "fox-verify reads the anchors from the bucket and finds the record intact" \
+  "$RC|$(grep -c 'ledger integrity: INTACT' <<<"$OUT")|$(grep -c "anchors read from s3://itanchors/anchors/$VB" <<<"$OUT")" "0|1|1"
+[ "$RC" = 0 ] || { echo "      what it said:"; head -8 <<<"$OUT" | sed 's/^/      /'; }
+assert_eq "…saying that the rows before the fork are anchored under main" "$(grep -c 'anchored under the parent' <<<"$OUT")" "1"
+pg "pg-$VB" "CREATE TABLE unanchored_t(x int)" >/dev/null; sleep 2
+OUT="$(fv --max-anchor-age 1s)"; RC=$?
+assert_eq "…and reports anchoring that has stopped while rows kept arriving" "$RC|$(grep -c 'anchoring has stopped' <<<"$OUT")" "1|1"
+$S blackbox checkpoint "$VB" >/dev/null 2>&1
+read -r DKEY _ <<<"$(rmc ls --versions --json "r/itanchors/anchors/$VB/" | python3 -c 'import sys,json
+j=json.loads(sys.stdin.readline()); print(j["key"], j["versionId"])')"
+rmc rm "r/itanchors/anchors/$VB/$DKEY" >/dev/null
+OUT="$(fv)"; RC=$?
+assert_eq "a delete marker over an anchor is reported, and its locked version still checked" \
+  "$RC|$(grep -c 'was deleted from the bucket' <<<"$OUT")|$(grep -c 'Merkle root mismatch' <<<"$OUT")" "1|1|0"
+printf '{"format":"ledger-anchor/1","merkle_root":"forged"}\n' | sudo docker run --rm -i --network "$DB_NETWORK" \
+  -e MC_HOST_r="http://$RAK:$RSK@$RS:9000" "$MC_IMG" pipe "r/itanchors/anchors/$VB/$DKEY" >/dev/null 2>&1
+OUT="$(fv)"; RC=$?
+assert_eq "an anchor overwritten in the bucket is reported, and the first version is what is checked" \
+  "$RC|$(grep -c 'was overwritten in the bucket' <<<"$OUT")|$(grep -c 'Merkle root mismatch' <<<"$OUT")" "1|1|0"
+$S branch delete "$VB" >/dev/null 2>&1
 assert_eq "fox check reports the target and its lock" \
   "$($S check 2>&1 | grep -c '^ok    anchor target .*itanchors.*COMPLIANCE')" "1"
 assert_eq "removing it says what stays locked" "$($S blackbox anchor-target none 2>&1 | grep -c 'locked until their retention ends')" "1"

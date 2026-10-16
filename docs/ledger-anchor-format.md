@@ -169,3 +169,43 @@ fox-verify --export main-ledger.jsonl --anchors ./anchors/main
 
 Exit status is `0` when intact, `1` when tampering is detected, `2` on a usage or
 connection error. `--json` prints the full report.
+
+### Against the anchor bucket
+
+Whoever audits should not need anything from the machine they are auditing but
+the ledger rows. With `--anchors-s3`, fox-verify reads the anchors straight from
+the bucket they are locked in (`fox blackbox anchor-target`), with read-only keys
+of the auditor's own:
+
+```bash
+export FOX_VERIFY_S3_SECRET_KEY=…          # or AWS_SECRET_ACCESS_KEY
+fox-verify --export main-ledger.jsonl \
+           --anchors-s3 s3://acme-anchors/anchors/main \
+           --s3-endpoint https://s3.eu-west-1.amazonaws.com --s3-region eu-west-1 \
+           --s3-access-key AKIA… --pubkey anchor.pub
+```
+
+It reads **every version** of every anchor, not the bucket's current listing,
+because Object Lock protects versions, not names: a plain delete only adds a
+delete marker on top, and an overwrite adds a new version. Each anchor's first
+version is its anchor of record. These are reported as problems:
+
+- a **delete marker** over an anchor (the locked version underneath is still
+  checked);
+- a **later version** that differs from the first (an attempt to rewrite it);
+- **no anchor at the start** of `main`'s sequence (the earliest one continues
+  an anchor the bucket does not have, unless older ones expired with their
+  retention). Any other branch is a clone whose first anchor continues its
+  parent's: the rows before it are anchored under the parent, which is noted,
+  and checked with `--anchors-s3 …/anchors/<parent>`;
+- **anchoring that has stopped**: rows the bucket has no anchor for, written
+  longer ago than `--max-anchor-age` (24 hours by default).
+
+Anchors not locked in COMPLIANCE mode, or whose retention the keys cannot read
+(`s3:GetObjectRetention`), are noted. Given `--anchors` as well, the local files
+are compared with the locked copies: one that differs was rewritten, one the
+bucket lacks was never copied, one only the bucket has was removed here.
+
+The keys need `s3:ListBucketVersions`, `s3:GetObjectVersion` and, to see each
+anchor's lock, `s3:GetObjectRetention`. Requests are signed with AWS Signature
+Version 4, by fox-verify itself, with no SDK.
