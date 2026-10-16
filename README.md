@@ -106,7 +106,7 @@ inherited by every branch, capture **every** schema change and attribute it:
 
 ```bash
 fox blackbox            # every schema change on this branch, most recent first
-fox blackbox verify     # prove the record has not been tampered with
+fox blackbox verify     # check the hash chain: an edited or deleted entry breaks it
 ```
 
 **It cannot be quietly rewritten.** The table is append-only, and each row is
@@ -121,10 +121,13 @@ Enterprise feature; **checking** them is not, in any edition — an independent
 verifier you have to buy is not much of an independent verifier, and an install
 that anchored before upgrading keeps every anchor it has and can still prove it.
 The security log's own anchors are free as well: that is the accountability
-trail, and safety stays free. Keep anchors off the machine (`FOX_ANCHOR_DIR`) and give the
+trail, and safety stays free. Keep anchors off the machine and give the
 public key (`fox blackbox anchor-key`) to whoever audits; someone with root on
 the machine itself holds the key too, so for them anchors held elsewhere are
-the proof. And
+the proof. `fox blackbox anchor-target set s3://bucket …` copies every anchor to
+a bucket of its own, ideally one the database administrators do not control,
+locked in Object Lock's COMPLIANCE mode for a year so nobody can remove or
+rewrite it; `fox check` warns while there is none. And
 because the gateway logs each client in as a **per-user Postgres role**, the
 recorded actor is the login identity: a client cannot forge who made a change,
 even by `SET`-ting a session variable. There is a **Blackbox** page in the web

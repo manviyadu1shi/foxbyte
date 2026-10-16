@@ -1107,6 +1107,33 @@ STATUS="$($S status 2>&1)"
 assert_eq "fox status names the target and the newest backup" \
   "$(echo "$STATUS" | grep -c 'target:   s3://itremote/fox')|$(echo "$STATUS" | grep -c 'newest:')" "1|1"
 assert_eq "the status API reports it too" "$(curl -sk -H "$AUTH" https://localhost:8080/api/status | python3 -c 'import sys,json;b=json.load(sys.stdin)["backup"];print(b["remote"],b["stale"])')" "True False"
+# G3 (expert review plan): anchors in a bucket of their own, each locked in
+# COMPLIANCE mode, which nobody can lift before it expires. GOVERNANCE, the
+# backup bucket's mode above, can be bypassed by anyone allowed to.
+rmc mb r/itplain >/dev/null; rmc mb --with-lock r/itanchors >/dev/null
+assert_eq "an anchor target without Object Lock is refused" \
+  "$(FOX_ANCHOR_S3_SECRET_KEY="$RSK" $S blackbox anchor-target set s3://itplain --endpoint "http://$RS:9000" --access-key "$RAK" --path-style --allow-http 2>&1 | grep -c 'does not have Object Lock')" "1"
+OUT="$(FOX_ANCHOR_S3_SECRET_KEY="$RSK" $S blackbox anchor-target set s3://itanchors --endpoint "http://$RS:9000" --access-key "$RAK" --path-style --allow-http --retention-days 1 2>&1)"
+assert_eq "one with Object Lock is set, saying how long each anchor is locked" \
+  "$(echo "$OUT" | grep -c 'COMPLIANCE mode for 1 days')|$(echo "$OUT" | grep -c 'Copied [1-9][0-9]* anchor')" "1|1"
+grep -q 'Copied' <<<"$OUT" || { echo "      what it said:"; tail -4 <<<"$OUT" | sed 's/^/      /'; }
+assert_eq "…warning that it shares the backup target's key" "$(echo "$OUT" | grep -c "backup target's access key")" "1"
+assert_eq "…its key kept in a 0600 file" "$(stat -c %a "$HOME/$BRAND_STATE_DIR/anchor-target.json")" "600"
+assert_eq "anchors there are locked in COMPLIANCE mode" \
+  "$(rmc retention info --recursive r/itanchors/anchors/main/ | grep -c COMPLIANCE | awk '{print ($1>0)}')|$(rmc retention info --recursive r/itanchors/anchors/_security-log/ | grep -c COMPLIANCE | awk '{print ($1>0)}')" "1|1"
+read -r CKEY CVID <<<"$(rmc ls --versions --json r/itanchors/anchors/main/ | python3 -c 'import sys,json
+j=json.loads(sys.stdin.readline()); print(j["key"], j["versionId"])')"
+assert_eq "…which even a governance bypass cannot remove" \
+  "$(rmc rm --version-id "$CVID" --bypass "r/itanchors/anchors/main/$CKEY" | grep -ci 'retention\|locked\|denied\|worm' | awk '{print ($1>0)}')|$(rmc ls "r/itanchors/anchors/main/$CKEY" | grep -c .)" "1|1"
+N0="$(rmc ls --recursive r/itanchors/anchors/main/ | grep -c '.json')"
+pg pg-main "CREATE TABLE IF NOT EXISTS anchor_target_t(x int)" >/dev/null
+$S blackbox checkpoint main >/dev/null 2>&1
+assert_eq "a new anchor follows them there" "$(rmc ls --recursive r/itanchors/anchors/main/ | grep -c '.json')" "$((N0 + 1))"
+assert_eq "fox check reports the target and its lock" \
+  "$($S check 2>&1 | grep -c '^ok    anchor target .*itanchors.*COMPLIANCE')" "1"
+assert_eq "removing it says what stays locked" "$($S blackbox anchor-target none 2>&1 | grep -c 'locked until their retention ends')" "1"
+assert_eq "…and fox check warns again" "$($S check 2>&1 | grep -c '^warn  anchor target')" "1"
+pg pg-main "SET bb.allow_destructive=on; DROP TABLE IF EXISTS anchor_target_t" >/dev/null
 assert_eq "going back to the local store works" "$($S backup target local 2>&1 | grep -c 'local object store')" "1"
 assert_eq "…and main archives there again" "$($S backup target | grep -c 'local object store')" "1"
 sudo docker rm -f "$RS" >/dev/null 2>&1

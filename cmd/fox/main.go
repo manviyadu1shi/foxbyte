@@ -133,6 +133,8 @@ Blackbox — the database's record of every schema change (RECORD layer; fox led
   realtime status | setup | teardown | slots   The row-level change feed
   blackbox checkpoint [branch]    Anchor new entries outside the database (Merkle checkpoint)
   blackbox anchor-key             Print the public key anchors are signed with (for fox-verify --pubkey)
+  blackbox anchor-target [show | set s3://… | none]
+                                  Keep every anchor in a bucket under Object Lock (COMPLIANCE), out of the admin's reach
   blackbox integrity [branch]     Check the record against its anchors (detects rewritten history)
   blackbox export [branch]        Write every entry as JSON lines (for fox-verify / audits)
   blackbox entries [branch]       Newest entries with their ids (--limit N)

@@ -456,3 +456,45 @@ func TestProbeBudgetFitsInsideTheCheckDeadline(t *testing.T) {
 		t.Errorf("deadlines are off, but the probe still got %s", got)
 	}
 }
+
+// Where anchors are kept, as `fox check` reports it (the expert review plan's
+// G3): the default leaves them where the machine's administrator could rewrite
+// them, and the line says so.
+func TestAnchorTargetLine(t *testing.T) {
+	remote := branch.Target{Kind: "s3", Bucket: "acme-backups", Endpoint: "https://s3.example", AccessKey: "AK1"}
+	at := branch.AnchorTarget{Target: branch.Target{Kind: "s3", Bucket: "acme-anchors", Endpoint: "https://s3.example", AccessKey: "AK2"}, RetentionDays: 365}
+
+	t.Run("none warns, names who could rewrite them, and the way out", func(t *testing.T) {
+		got := anchorTargetLine(branch.AnchorTarget{}, false, nil, branch.Target{Kind: "local"}, branch.AnchorCopies{})
+		if got.state != stateWarn || !strings.Contains(got.detail, "this machine only") || !strings.Contains(got.fix, "anchor-target set") {
+			t.Errorf("%+v", got)
+		}
+		got = anchorTargetLine(branch.AnchorTarget{}, false, nil, remote, branch.AnchorCopies{})
+		if got.state != stateWarn || !strings.Contains(got.detail, "backup bucket") {
+			t.Errorf("with a backup target: %+v", got)
+		}
+	})
+	t.Run("a target is fine, with its lock and retention", func(t *testing.T) {
+		got := anchorTargetLine(at, true, nil, remote, branch.AnchorCopies{Total: 4})
+		if got.state != stateOK || !strings.Contains(got.detail, "acme-anchors") || !strings.Contains(got.detail, "COMPLIANCE") || !strings.Contains(got.detail, "365 days") {
+			t.Errorf("%+v", got)
+		}
+	})
+	t.Run("copies waiting a short while are mentioned, not warned about", func(t *testing.T) {
+		got := anchorTargetLine(at, true, nil, remote, branch.AnchorCopies{Total: 4, Waiting: 1, OldestWaiting: time.Minute})
+		if got.state != stateOK || !strings.Contains(got.detail, "1 waiting") {
+			t.Errorf("%+v", got)
+		}
+	})
+	t.Run("copies stuck for a day warn: a gap is what a rewrite would want", func(t *testing.T) {
+		got := anchorTargetLine(at, true, nil, remote, branch.AnchorCopies{Total: 4, Waiting: 2, OldestWaiting: 30 * time.Hour})
+		if got.state != stateWarn || !strings.Contains(got.detail, "2 anchor(s) not copied") {
+			t.Errorf("%+v", got)
+		}
+	})
+	t.Run("an unreadable target fails", func(t *testing.T) {
+		if got := anchorTargetLine(branch.AnchorTarget{}, false, errTargetForTest{}, remote, branch.AnchorCopies{}); got.state != stateFail {
+			t.Errorf("%+v", got)
+		}
+	})
+}
